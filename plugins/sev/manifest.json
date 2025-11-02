@@ -7,10 +7,9 @@
       "id": "0"
     }
   ],
-  "main": "Injector.plugin.js",
+  "main": "src/index.ts",
   "vendetta": {
     "icon": "💬"
   },
   "version": "1.0.0"
-
 }
