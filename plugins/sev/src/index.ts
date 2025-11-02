@@ -1,29 +1,17 @@
 /**
- * @name Injector
+ * @name Message Injector
  * @description Inject fake messages in DMs from anyone
  * @version 1.0.0
  */
+import { FluxDispatcher } from "@vendetta/metro/common";
+import { findByProps, findByStoreName } from "@vendetta/metro";
+import { before } from "@vendetta/patcher";
+import { storage } from "@vendetta/plugin";
+import { showToast } from "@vendetta/ui/toasts";
+import { logger } from "@vendetta";
 import settingsComponent from "./settings";
 
-// Extend Window interface for Bunny/Vendetta
-declare global {
-    interface Window {
-        bunny: any;
-        vendetta: any;
-    }
-}
-
-// Detect which mod we're running on
-const isBunny = typeof window.bunny !== 'undefined';
-const isVendetta = typeof window.vendetta !== 'undefined';
-const API = isBunny ? window.bunny : window.vendetta;
-
-const { findByProps, findByStoreName } = API.metro;
-const { after, before } = API.patcher;
-const { storage } = API.plugin;
-const { showToast } = API.ui?.toasts || { showToast: console.log };
-
-// Initialize storage
+// Initialize storage defaults
 storage.enabled ??= true;
 storage.debug ??= false;
 storage.persistentMessages ??= {};
@@ -31,22 +19,23 @@ storage.autoInjectOnStartup ??= true;
 storage.preventMessageDeletion ??= true;
 
 const unpatches: (() => void)[] = [];
-let FluxDispatcher: any = null;
 let ChannelStore: any = null;
 let UserStore: any = null;
 let MessageStore: any = null;
 let SelectedChannelStore: any = null;
 let currentChannelId: string | null = null;
+let channelMonitorInterval: any = null;
+let aggressiveMonitorInterval: any = null;
 
-// Logging
+// Logging helpers
 const log = (msg: string, data?: any) => {
     if (storage.debug) {
-        console.log(`[MessageInjector] ${msg}`, data || '');
+        logger.log(`[MessageInjector] ${msg}`, data || '');
     }
 };
 
 const logError = (msg: string, err?: any) => {
-    console.error(`[MessageInjector] ${msg}`, err || '');
+    logger.error(`[MessageInjector] ${msg}`, err || '');
 };
 
 // Delay helper
@@ -80,7 +69,7 @@ function findStore(names: string[], methods: string[] = []): any {
     return null;
 }
 
-// Get user info (username, avatar) from user ID
+// Get user info from user ID
 async function getUserInfo(userId: string): Promise<{ username: string; avatar: string | null; discriminator: string }> {
     try {
         if (UserStore) {
@@ -123,7 +112,6 @@ function generateMessageId(): string {
     return `${Date.now()}${Math.random().toString(36).substring(2, 11)}`;
 }
 
-// Create message object
 async function createMessageObject(options: {
     channelId: string;
     userId: string;
@@ -134,17 +122,15 @@ async function createMessageObject(options: {
     timestamp?: string;
     messageId?: string;
 }): Promise<any> {
-
     let username = options.username;
     let avatar = options.avatar;
-
-    // If username not provided, fetch from UserStore
+    
     if (!username) {
         const userInfo = await getUserInfo(options.userId);
         username = userInfo.username;
-        if (!avatar) avatar = userInfo.avatar;
+        if (!avatar) avatar = userInfo.avatar ?? undefined;
     }
-
+    
     const message = {
         id: options.messageId || generateMessageId(),
         channel_id: options.channelId,
@@ -152,7 +138,7 @@ async function createMessageObject(options: {
             id: options.userId,
             username: username || 'Unknown User',
             discriminator: '0',
-            avatar: avatar || undefined,
+            avatar: avatar ?? undefined,
             bot: false,
             public_flags: 0
         },
@@ -170,7 +156,7 @@ async function createMessageObject(options: {
         type: 0,
         flags: 0
     };
-
+    
     log('Created message object', message);
     return message;
 }
@@ -223,7 +209,6 @@ export async function fakeMessage(options: {
 }): Promise<boolean> {
 
     try {
-        // Get channel ID
         let channelId = options.channelId;
         if (!channelId && options.targetUserId) {
             channelId = getDMChannelId(options.targetUserId);
@@ -235,7 +220,6 @@ export async function fakeMessage(options: {
             return false;
         }
 
-        // Create message
         const message = await createMessageObject({
             channelId,
             userId: options.fromUserId,
@@ -245,7 +229,6 @@ export async function fakeMessage(options: {
             embed: options.embed
         });
 
-        // Save to persistent storage if requested
         if (options.persistent) {
             if (!storage.persistentMessages[channelId]) {
                 storage.persistentMessages[channelId] = [];
@@ -255,7 +238,6 @@ export async function fakeMessage(options: {
             log('Message saved to persistent storage', message.id);
         }
 
-        // Inject the message
         const success = injectMessage(message);
 
         if (success) {
@@ -289,87 +271,86 @@ function setupMessagePersistence() {
     try {
         if (!FluxDispatcher) return;
 
-        unpatches.push(
-            before('dispatch', FluxDispatcher, (args: any[]) => {
-                if (!storage.enabled) return;
+        const unpatch = before('dispatch', FluxDispatcher, (args: any[]) => {
+            if (!storage.enabled) return;
 
-                const event = args[0];
-                if (!event || !event.type) return;
+            const event = args[0];
+            if (!event || !event.type) return;
 
-                // Prevent deletion of fake messages
-                if (storage.preventMessageDeletion && event.type === 'MESSAGE_DELETE') {
-                    const messageId = event.id;
-                    const channelId = event.channelId;
+            // Prevent deletion of fake messages
+            if (storage.preventMessageDeletion && event.type === 'MESSAGE_DELETE') {
+                const messageId = event.id;
+                const channelId = event.channelId;
 
-                    if (channelId && storage.persistentMessages[channelId]) {
-                        const messages = storage.persistentMessages[channelId];
-                        const fakeMessage = messages.find((m: any) => m.id === messageId);
+                if (channelId && storage.persistentMessages[channelId]) {
+                    const messages = storage.persistentMessages[channelId];
+                    const fakeMessage = messages.find((m: any) => m.id === messageId);
 
-                        if (fakeMessage) {
-                            log('Prevented deletion of fake message', messageId);
-                            args[0] = { type: 'NOOP' };
-                            setTimeout(() => injectMessage(fakeMessage), 50);
-                        }
+                    if (fakeMessage) {
+                        log('Prevented deletion of fake message', messageId);
+                        args[0] = { type: 'NOOP' };
+                        setTimeout(() => injectMessage(fakeMessage), 50);
                     }
                 }
+            }
 
-                // Handle bulk deletions
-                if (storage.preventMessageDeletion && event.type === 'MESSAGE_DELETE_BULK') {
-                    const channelId = event.channelId;
-                    if (channelId && storage.persistentMessages[channelId]) {
-                        const ids = event.ids || [];
-                        const messages = storage.persistentMessages[channelId];
-                        const hasFake = messages.some((m: any) => ids.includes(m.id));
+            // Handle bulk deletions
+            if (storage.preventMessageDeletion && event.type === 'MESSAGE_DELETE_BULK') {
+                const channelId = event.channelId;
+                if (channelId && storage.persistentMessages[channelId]) {
+                    const ids = event.ids || [];
+                    const messages = storage.persistentMessages[channelId];
+                    const hasFake = messages.some((m: any) => ids.includes(m.id));
 
-                        if (hasFake) {
-                            args[0] = { type: 'NOOP' };
-                            setTimeout(() => reinjectMessagesForChannel(channelId), 100);
-                        }
-                    }
-                }
-
-                // Reinject on message load - MULTIPLE ATTEMPTS
-                if (event.type === 'LOAD_MESSAGES_SUCCESS' || event.type === 'LOAD_MESSAGES') {
-                    const channelId = event.channelId;
-                    if (channelId && storage.persistentMessages[channelId]) {
-                        setTimeout(() => reinjectMessagesForChannel(channelId), 200);
-                        setTimeout(() => reinjectMessagesForChannel(channelId), 500);
-                        setTimeout(() => reinjectMessagesForChannel(channelId), 1000);
-                    }
-                }
-
-                // Reinject on cache/overlay events
-                if (event.type === 'CACHE_LOADED' ||
-                    event.type === 'OVERLAY_INITIALIZE' ||
-                    event.type === 'CHANNEL_UPDATES') {
-                    if (currentChannelId && storage.persistentMessages[currentChannelId]) {
-                        setTimeout(() => currentChannelId && reinjectMessagesForChannel(currentChannelId), 300);
-                    }
-                }
-
-                // Handle profile opens/closes and UI updates
-                if (event.type === 'USER_PROFILE_MODAL_OPEN' ||
-                    event.type === 'USER_PROFILE_MODAL_CLOSE' ||
-                    event.type === 'LAYER_PUSH' ||
-                    event.type === 'LAYER_POP' ||
-                    event.type === 'TYPING_START' ||
-                    event.type === 'TYPING_STOP') {
-                    if (currentChannelId && storage.persistentMessages[currentChannelId]) {
-                        setTimeout(() => currentChannelId && reinjectMessagesForChannel(currentChannelId), 50);
-                        setTimeout(() => currentChannelId && reinjectMessagesForChannel(currentChannelId), 300);
-                    }
-                }
-
-                // On any message update, reinject to maintain presence
-                if (event.type === 'MESSAGE_UPDATE') {
-                    const channelId = event.message?.channel_id;
-                    if (channelId && storage.persistentMessages[channelId]) {
+                    if (hasFake) {
+                        args[0] = { type: 'NOOP' };
                         setTimeout(() => reinjectMessagesForChannel(channelId), 100);
                     }
                 }
-            })
-        );
+            }
 
+            // Reinject on message load
+            if (event.type === 'LOAD_MESSAGES_SUCCESS' || event.type === 'LOAD_MESSAGES') {
+                const channelId = event.channelId;
+                if (channelId && storage.persistentMessages[channelId]) {
+                    setTimeout(() => reinjectMessagesForChannel(channelId), 200);
+                    setTimeout(() => reinjectMessagesForChannel(channelId), 500);
+                    setTimeout(() => reinjectMessagesForChannel(channelId), 1000);
+                }
+            }
+
+            // Reinject on cache/overlay events
+            if (event.type === 'CACHE_LOADED' ||
+                event.type === 'OVERLAY_INITIALIZE' ||
+                event.type === 'CHANNEL_UPDATES') {
+                if (currentChannelId && storage.persistentMessages[currentChannelId]) {
+                    setTimeout(() => currentChannelId && reinjectMessagesForChannel(currentChannelId), 300);
+                }
+            }
+
+            // Handle profile opens/closes and UI updates
+            if (event.type === 'USER_PROFILE_MODAL_OPEN' ||
+                event.type === 'USER_PROFILE_MODAL_CLOSE' ||
+                event.type === 'LAYER_PUSH' ||
+                event.type === 'LAYER_POP' ||
+                event.type === 'TYPING_START' ||
+                event.type === 'TYPING_STOP') {
+                if (currentChannelId && storage.persistentMessages[currentChannelId]) {
+                    setTimeout(() => currentChannelId && reinjectMessagesForChannel(currentChannelId), 50);
+                    setTimeout(() => currentChannelId && reinjectMessagesForChannel(currentChannelId), 300);
+                }
+            }
+
+            // On any message update, reinject to maintain presence
+            if (event.type === 'MESSAGE_UPDATE') {
+                const channelId = event.message?.channel_id;
+                if (channelId && storage.persistentMessages[channelId]) {
+                    setTimeout(() => reinjectMessagesForChannel(channelId), 100);
+                }
+            }
+        });
+
+        unpatches.push(unpatch);
         log('Message persistence system setup with comprehensive event coverage');
     } catch (e) {
         logError('Failed to setup message persistence', e);
@@ -379,7 +360,7 @@ function setupMessagePersistence() {
 // Monitor channel changes and reinject messages
 function startChannelMonitoring() {
     // Fast interval for immediate response
-    setInterval(() => {
+    channelMonitorInterval = setInterval(() => {
         if (!SelectedChannelStore) return;
 
         try {
@@ -398,7 +379,7 @@ function startChannelMonitoring() {
     }, 1000);
 
     // Additional aggressive monitor for UI changes
-    setInterval(() => {
+    aggressiveMonitorInterval = setInterval(() => {
         if (currentChannelId && storage.persistentMessages[currentChannelId]) {
             reinjectMessagesForChannel(currentChannelId);
         }
@@ -441,13 +422,12 @@ export async function quickTest(targetUserId: string, fromUserId: string) {
 // Initialize modules
 async function initModules() {
     try {
-        FluxDispatcher = findStore(['FluxDispatcher', 'Dispatcher'], ['dispatch', 'subscribe']);
         ChannelStore = findStore(['ChannelStore'], ['getChannel', 'getDMFromUserId']);
         UserStore = findStore(['UserStore', 'CurrentUserStore'], ['getUser', 'getCurrentUser']);
         MessageStore = findStore(['MessageStore'], ['getMessages', 'getMessage']);
         SelectedChannelStore = findStore(['SelectedChannelStore'], ['getChannelId']);
 
-        const ready = FluxDispatcher && ChannelStore && UserStore;
+        const ready = ChannelStore && UserStore;
 
         if (ready) {
             log('All critical modules loaded');
@@ -462,90 +442,91 @@ async function initModules() {
     }
 }
 
-// Initialize the plugin immediately
-(async () => {
-    try {
-        console.log('[MessageInjector] Loading...');
-
-        await delay(1000);
-
-        const modulesReady = await initModules();
-        if (!modulesReady) {
-            logError('Failed to load critical modules');
-            if (showToast) showToast('Plugin failed to load', 'Small');
-            return;
-        }
-
-        setupMessagePersistence();
-        startChannelMonitoring();
-
-        if (storage.autoInjectOnStartup) {
-            await delay(2000);
-            const channelCount = Object.keys(storage.persistentMessages).length;
-            if (channelCount > 0) {
-                log(`Auto-injecting messages for ${channelCount} channels`);
-                Object.keys(storage.persistentMessages).forEach(channelId => {
-                    setTimeout(() => {
-                        reinjectMessagesForChannel(channelId);
-                    }, 500);
-                });
-            }
-        }
-
-        // Expose API to window for console access
-        (window as any).__MESSAGE_FAKER__ = {
-            fakeMessage,
-            clearAllMessages,
-            clearChannelMessages,
-            getAllMessages,
-            quickTest,
-            reinjectChannel: reinjectMessagesForChannel,
-            getStatus: () => ({
-                enabled: storage.enabled,
-                messageCount: Object.values(storage.persistentMessages).reduce((acc: number, msgs: any) => acc + msgs.length, 0),
-                channelCount: Object.keys(storage.persistentMessages).length
-            })
-        };
-
-        console.log('[MessageInjector] Loaded successfully');
-        if (showToast) showToast('Message Injector loaded!', 'Check');
-
-    } catch (e) {
-        logError('Fatal error during load', e);
-        if (showToast) showToast('Plugin failed to load', 'Small');
-    }
-})();
-
-export const onLoad = () => { };
-
-// Cleanup function for when plugin is unloaded
-export const onUnload = () => {
-    try {
-        for (const unpatch of unpatches) {
-            try {
-                unpatch();
-            } catch (e) { }
-        }
-
-        unpatches.length = 0;
-
-        if ((window as any).__MESSAGE_FAKER__) {
-            delete (window as any).__MESSAGE_FAKER__;
-        }
-
-        console.log('[MessageInjector] Unloaded');
-        if (showToast) showToast('Plugin unloaded', 'Check');
-    } catch (e) {
-        logError('Error during unload', e);
-    }
-};
-
-// Export separately so they can be referenced individually if needed
-export { settingsComponent as settings };
-
-// Export the lifecycle object expected by Vendetta/Kettu
+// Plugin lifecycle
 export default {
-    onLoad,
-    onUnload,
+    onLoad: async () => {
+        try {
+            logger.log('[MessageInjector] Loading...');
+
+            await delay(1000);
+
+            const modulesReady = await initModules();
+            if (!modulesReady) {
+                logError('Failed to load critical modules');
+                if (showToast) showToast('Plugin failed to load', 'Small');
+                return;
+            }
+
+            setupMessagePersistence();
+            startChannelMonitoring();
+
+            if (storage.autoInjectOnStartup) {
+                await delay(2000);
+                const channelCount = Object.keys(storage.persistentMessages).length;
+                if (channelCount > 0) {
+                    log(`Auto-injecting messages for ${channelCount} channels`);
+                    Object.keys(storage.persistentMessages).forEach(channelId => {
+                        setTimeout(() => {
+                            reinjectMessagesForChannel(channelId);
+                        }, 500);
+                    });
+                }
+            }
+
+            // Expose API to window for console access
+            (window as any).__MESSAGE_FAKER__ = {
+                fakeMessage,
+                clearAllMessages,
+                clearChannelMessages,
+                getAllMessages,
+                quickTest,
+                reinjectChannel: reinjectMessagesForChannel,
+                getStatus: () => ({
+                    enabled: storage.enabled,
+                    messageCount: Object.values(storage.persistentMessages).reduce((acc: number, msgs: any) => acc + msgs.length, 0),
+                    channelCount: Object.keys(storage.persistentMessages).length
+                })
+            };
+
+            logger.log('[MessageInjector] Loaded successfully');
+            if (showToast) showToast('Message Injector loaded!', 'Check');
+
+        } catch (e) {
+            logError('Fatal error during load', e);
+            if (showToast) showToast('Plugin failed to load', 'Small');
+        }
+    },
+
+    onUnload: () => {
+        try {
+            for (const unpatch of unpatches) {
+                try {
+                    unpatch();
+                } catch (e) { }
+            }
+
+            unpatches.length = 0;
+
+            if (channelMonitorInterval) {
+                clearInterval(channelMonitorInterval);
+                channelMonitorInterval = null;
+            }
+
+            if (aggressiveMonitorInterval) {
+                clearInterval(aggressiveMonitorInterval);
+                aggressiveMonitorInterval = null;
+            }
+
+            if ((window as any).__MESSAGE_FAKER__) {
+                delete (window as any).__MESSAGE_FAKER__;
+            }
+
+            logger.log('[MessageInjector] Unloaded');
+            if (showToast) showToast('Plugin unloaded', 'Check');
+        } catch (e) {
+            logError('Error during unload', e);
+        }
+    },
+
     settings: settingsComponent,
 };
