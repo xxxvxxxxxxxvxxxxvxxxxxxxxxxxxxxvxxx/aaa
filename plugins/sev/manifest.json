@@ -1,0 +1,16 @@
+{
+  "name": "injector",
+  "description": "Inject fake messages in DMs from anyone",
+  "authors": [
+    {
+      "name": "Author",
+      "id": "0"
+    }
+  ],
+  "main": "Injector.plugin.js",
+  "vendetta": {
+    "icon": "💬"
+  },
+  "version": "1.0.0"
+
+}
