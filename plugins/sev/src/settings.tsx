@@ -3,7 +3,6 @@ import { Forms } from "@vendetta/ui/components";
 import { useProxy } from "@vendetta/storage";
 import { storage } from "@vendetta/plugin";
 import { showToast } from "@vendetta/ui/toasts";
-import { fakeMessage, clearAllMessages, clearChannelMessages, getAllMessages, quickTest } from ".";
 
 const { FormInput, FormSwitch, FormSection, FormDivider, FormRow, FormText } = Forms;
 const { View, Text, ScrollView, TouchableOpacity, StyleSheet } = RN;
@@ -54,6 +53,11 @@ const styles = StyleSheet.create({
     },
 });
 
+// Helper to safely access the API
+function getAPI() {
+    return (window as any).__MESSAGE_FAKER__;
+}
+
 export default () => {
     useProxy(storage);
 
@@ -65,6 +69,12 @@ export default () => {
     const [embedImage, setEmbedImage] = React.useState("");
 
     const handleSendFakeMessage = async () => {
+        const api = getAPI();
+        if (!api) {
+            showToast("❌ Plugin not ready", "Small");
+            return;
+        }
+
         if (!targetUserId.trim()) {
             showToast("❌ Enter target user ID", "Small");
             return;
@@ -88,26 +98,40 @@ export default () => {
             type: 'rich'
         } : undefined;
 
-        const success = await fakeMessage({
-            targetUserId: targetUserId.trim(),
-            fromUserId: fromUserId.trim(),
-            content: messageContent.trim(),
-            embed: embed,
-            persistent: true
-        });
+        try {
+            const success = await api.fakeMessage({
+                targetUserId: targetUserId.trim(),
+                fromUserId: fromUserId.trim(),
+                content: messageContent.trim(),
+                embed: embed,
+                persistent: true
+            });
 
-        if (success) {
-            showToast("✅ Fake message sent!", "Check");
+            if (success) {
+                showToast("✅ Fake message sent!", "Check");
+            }
+        } catch (e) {
+            showToast("❌ Failed to send message", "Small");
         }
     };
 
     const handleQuickTest = async () => {
+        const api = getAPI();
+        if (!api) {
+            showToast("❌ Plugin not ready", "Small");
+            return;
+        }
+
         if (!targetUserId.trim() || !fromUserId.trim()) {
             showToast("❌ Fill in both User IDs first", "Small");
             return;
         }
 
-        await quickTest(targetUserId.trim(), fromUserId.trim());
+        try {
+            await api.quickTest(targetUserId.trim(), fromUserId.trim());
+        } catch (e) {
+            showToast("❌ Test failed", "Small");
+        }
     };
 
     const pasteTargetId = async () => {
@@ -313,7 +337,10 @@ __MESSAGE_FAKER__.fakeMessage({
                 <TouchableOpacity
                     style={[styles.button, styles.dangerButton]}
                     onPress={() => {
-                        clearAllMessages();
+                        const api = getAPI();
+                        if (api) {
+                            api.clearAllMessages();
+                        }
                         setTargetUserId("");
                         setFromUserId("");
                         setMessageContent("");
