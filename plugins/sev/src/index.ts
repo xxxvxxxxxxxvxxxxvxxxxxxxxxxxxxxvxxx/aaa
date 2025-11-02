@@ -41,6 +41,66 @@ const logError = (msg: string, err?: any) => {
 // Delay helper
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// Validate timestamp
+function validateTimestamp(timestamp: string | undefined): string {
+    if (!timestamp) {
+        return new Date().toISOString();
+    }
+    
+    try {
+        const date = new Date(timestamp);
+        if (isNaN(date.getTime())) {
+            logError('Invalid timestamp, using current time', timestamp);
+            return new Date().toISOString();
+        }
+        return date.toISOString();
+    } catch (e) {
+        logError('Failed to parse timestamp, using current time', e);
+        return new Date().toISOString();
+    }
+}
+
+// Validate and sanitize user ID
+function validateUserId(userId: string): boolean {
+    if (!userId || typeof userId !== 'string') {
+        return false;
+    }
+    // Discord snowflake IDs are numeric strings
+    return /^\d+$/.test(userId.trim());
+}
+
+// Validate embed
+function validateEmbed(embed: any): any | undefined {
+    if (!embed) return undefined;
+    
+    try {
+        const validEmbed: any = {
+            type: 'rich'
+        };
+        
+        if (embed.title && typeof embed.title === 'string') {
+            validEmbed.title = embed.title.substring(0, 256);
+        }
+        
+        if (embed.description && typeof embed.description === 'string') {
+            validEmbed.description = embed.description.substring(0, 4096);
+        }
+        
+        if (embed.image?.url && typeof embed.image.url === 'string') {
+            validEmbed.image = { url: embed.image.url };
+        }
+        
+        if (embed.thumbnail?.url && typeof embed.thumbnail.url === 'string') {
+            validEmbed.thumbnail = { url: embed.thumbnail.url };
+        }
+        
+        return Object.keys(validEmbed).length > 1 ? validEmbed : undefined;
+    } catch (e) {
+        logError('Failed to validate embed', e);
+        return undefined;
+    }
+}
+
 // Find store helper
 function findStore(names: string[], methods: string[] = []): any {
     for (const name of names) {
@@ -107,11 +167,14 @@ function getDMChannelId(userId: string): string | null {
     return null;
 }
 
-// Generate unique message ID
+// Generate unique message ID (Discord snowflake-like)
 function generateMessageId(): string {
-    return `${Date.now()}${Math.random().toString(36).substring(2, 11)}`;
+    const timestamp = Date.now();
+    const random = Math.floor(Math.random() * 4096);
+    return `${timestamp}${random.toString().padStart(4, '0')}`;
 }
 
+// Create message object with validation
 async function createMessageObject(options: {
     channelId: string;
     userId: string;
@@ -122,6 +185,12 @@ async function createMessageObject(options: {
     timestamp?: string;
     messageId?: string;
 }): Promise<any> {
+
+    // Validate user ID
+    if (!validateUserId(options.userId)) {
+        throw new Error('Invalid user ID');
+    }
+
     let username = options.username;
     let avatar = options.avatar;
     
@@ -130,7 +199,13 @@ async function createMessageObject(options: {
         username = userInfo.username;
         if (!avatar) avatar = userInfo.avatar ?? undefined;
     }
-    
+
+    // Validate and sanitize timestamp
+    const timestamp = validateTimestamp(options.timestamp);
+
+    // Validate embed
+    const validEmbed = validateEmbed(options.embed);
+
     const message = {
         id: options.messageId || generateMessageId(),
         channel_id: options.channelId,
@@ -142,21 +217,21 @@ async function createMessageObject(options: {
             bot: false,
             public_flags: 0
         },
-        content: options.content || '',
-        timestamp: options.timestamp || new Date().toISOString(),
+        content: (options.content || '').substring(0, 2000), // Discord message limit
+        timestamp: timestamp,
         edited_timestamp: null,
         tts: false,
         mention_everyone: false,
         mentions: [],
         mention_roles: [],
         attachments: [],
-        embeds: options.embed ? [options.embed] : [],
+        embeds: validEmbed ? [validEmbed] : [],
         reactions: [],
         pinned: false,
         type: 0,
         flags: 0
     };
-    
+
     log('Created message object', message);
     return message;
 }
@@ -186,13 +261,27 @@ function injectMessage(message: any): boolean {
     }
 }
 
-// Save persistent messages to storage
+// Save persistent messages to storage with error recovery
 function savePersistentMessages() {
     try {
+        // Validate storage before saving
+        if (typeof storage.persistentMessages !== 'object') {
+            storage.persistentMessages = {};
+        }
+
+        // Remove any corrupted entries
+        Object.keys(storage.persistentMessages).forEach(channelId => {
+            if (!Array.isArray(storage.persistentMessages[channelId])) {
+                delete storage.persistentMessages[channelId];
+            }
+        });
+
         storage.persistentMessages = JSON.parse(JSON.stringify(storage.persistentMessages));
         log('Saved persistent messages', Object.keys(storage.persistentMessages).length);
     } catch (e) {
         logError('Failed to save persistent messages', e);
+        // Recovery: reset storage if corrupted
+        storage.persistentMessages = {};
     }
 }
 
@@ -209,17 +298,31 @@ export async function fakeMessage(options: {
 }): Promise<boolean> {
 
     try {
+        // Validate sender user ID
+        if (!validateUserId(options.fromUserId)) {
+            logError('Invalid sender user ID');
+            if (showToast) showToast('❌ Invalid sender user ID', 'Small');
+            return false;
+        }
+
+        // Get channel ID
         let channelId = options.channelId;
         if (!channelId && options.targetUserId) {
+            if (!validateUserId(options.targetUserId)) {
+                logError('Invalid target user ID');
+                if (showToast) showToast('❌ Invalid target user ID', 'Small');
+                return false;
+            }
             channelId = getDMChannelId(options.targetUserId);
         }
 
         if (!channelId) {
             logError('No valid channel ID found');
-            if (showToast) showToast('Failed: Could not find DM channel', 'Small');
+            if (showToast) showToast('❌ Could not find DM channel', 'Small');
             return false;
         }
 
+        // Create message with validation
         const message = await createMessageObject({
             channelId,
             userId: options.fromUserId,
@@ -229,6 +332,7 @@ export async function fakeMessage(options: {
             embed: options.embed
         });
 
+        // Save to persistent storage if requested
         if (options.persistent) {
             if (!storage.persistentMessages[channelId]) {
                 storage.persistentMessages[channelId] = [];
@@ -238,6 +342,7 @@ export async function fakeMessage(options: {
             log('Message saved to persistent storage', message.id);
         }
 
+        // Inject the message
         const success = injectMessage(message);
 
         if (success) {
@@ -247,7 +352,7 @@ export async function fakeMessage(options: {
         return success;
     } catch (e) {
         logError('Failed to send fake message', e);
-        if (showToast) showToast('Failed to send fake message', 'Small');
+        if (showToast) showToast('❌ Failed to send message', 'Small');
         return false;
     }
 }
@@ -257,11 +362,23 @@ function reinjectMessagesForChannel(channelId: string) {
     if (!storage.persistentMessages[channelId]) return;
 
     const messages = storage.persistentMessages[channelId];
+    
+    // Validate messages array
+    if (!Array.isArray(messages)) {
+        delete storage.persistentMessages[channelId];
+        savePersistentMessages();
+        return;
+    }
+
     log(`Reinjecting ${messages.length} messages for channel ${channelId}`);
 
     messages.forEach((message: any, index: number) => {
         setTimeout(() => {
-            injectMessage(message);
+            try {
+                injectMessage(message);
+            } catch (e) {
+                logError('Failed to reinject message', e);
+            }
         }, index * 50);
     });
 }
@@ -391,7 +508,7 @@ export function clearAllMessages() {
     storage.persistentMessages = {};
     savePersistentMessages();
     log('Cleared all persistent messages');
-    if (showToast) showToast('All fake messages cleared', 'Check');
+    if (showToast) showToast('✅ All fake messages cleared', 'Check');
 }
 
 // Clear messages for specific channel
@@ -400,7 +517,7 @@ export function clearChannelMessages(channelId: string) {
         delete storage.persistentMessages[channelId];
         savePersistentMessages();
         log(`Cleared messages for channel ${channelId}`);
-        if (showToast) showToast('Channel messages cleared', 'Check');
+        if (showToast) showToast('✅ Channel messages cleared', 'Check');
     }
 }
 
@@ -414,7 +531,7 @@ export async function quickTest(targetUserId: string, fromUserId: string) {
     return await fakeMessage({
         targetUserId,
         fromUserId,
-        content: 'Test message from Message Injector plugin!',
+        content: 'Test message from Message Injector plugin! 🎉',
         persistent: true
     });
 }
@@ -442,18 +559,54 @@ async function initModules() {
     }
 }
 
+// Recover from corrupted storage
+function recoverStorage() {
+    try {
+        if (typeof storage.persistentMessages !== 'object' || storage.persistentMessages === null) {
+            logger.warn('[MessageInjector] Corrupted storage detected, resetting...');
+            storage.persistentMessages = {};
+            return;
+        }
+
+        // Clean up invalid entries
+        Object.keys(storage.persistentMessages).forEach(channelId => {
+            if (!Array.isArray(storage.persistentMessages[channelId])) {
+                delete storage.persistentMessages[channelId];
+            } else {
+                // Validate each message has required fields
+                storage.persistentMessages[channelId] = storage.persistentMessages[channelId].filter((msg: any) => {
+                    return msg && msg.id && msg.channel_id && msg.author && msg.timestamp;
+                });
+
+                // Remove empty arrays
+                if (storage.persistentMessages[channelId].length === 0) {
+                    delete storage.persistentMessages[channelId];
+                }
+            }
+        });
+
+        savePersistentMessages();
+    } catch (e) {
+        logError('Failed to recover storage', e);
+        storage.persistentMessages = {};
+    }
+}
+
 // Plugin lifecycle
 export default {
     onLoad: async () => {
         try {
             logger.log('[MessageInjector] Loading...');
 
+            // Recover from any storage corruption
+            recoverStorage();
+
             await delay(1000);
 
             const modulesReady = await initModules();
             if (!modulesReady) {
                 logError('Failed to load critical modules');
-                if (showToast) showToast('Plugin failed to load', 'Small');
+                if (showToast) showToast('❌ Plugin failed to load', 'Small');
                 return;
             }
 
@@ -488,12 +641,12 @@ export default {
                 })
             };
 
-            logger.log('[MessageInjector] Loaded successfully');
-            if (showToast) showToast('Message Injector loaded!', 'Check');
+            logger.log('[MessageInjector] ✅ Loaded successfully');
+            if (showToast) showToast('✅ Message Injector loaded!', 'Check');
 
         } catch (e) {
             logError('Fatal error during load', e);
-            if (showToast) showToast('Plugin failed to load', 'Small');
+            if (showToast) showToast('❌ Plugin failed to load', 'Small');
         }
     },
 
