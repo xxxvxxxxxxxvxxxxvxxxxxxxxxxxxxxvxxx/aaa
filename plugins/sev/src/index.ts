@@ -1,7 +1,7 @@
 /**
  * @name Message Injector
  * @description Inject fake messages in DMs from anyone
- * @version 1.0.2
+ * @version 1.0.3
  */
 import { FluxDispatcher } from "@vendetta/metro/common";
 import { findByProps, findByStoreName } from "@vendetta/metro";
@@ -333,6 +333,47 @@ async function createMessageObject(options: {
     return message;
 }
 
+// FIX 1: Acknowledge messages to mark as read and prevent notifications
+function acknowledgeMessages(channelId: string, messageId: string) {
+    try {
+        if (!FluxDispatcher) return;
+        
+        // Dispatch MESSAGE_ACK to mark the channel as read up to this message
+        FluxDispatcher.dispatch({
+            type: 'MESSAGE_ACK',
+            channelId: channelId,
+            messageId: messageId,
+            manual: false,
+            local: true
+        });
+        
+        log(`Acknowledged message ${messageId} in channel ${channelId}`);
+    } catch (e) {
+        logError('Failed to acknowledge message', e);
+    }
+}
+
+// FIX 2: Update channel state to keep DM in list
+function updateChannelState(channelId: string, message: any) {
+    try {
+        if (!FluxDispatcher) return;
+        
+        // Dispatch CHANNEL_UPDATES to ensure the channel stays in the DM list
+        FluxDispatcher.dispatch({
+            type: 'CHANNEL_UPDATES',
+            channels: [{
+                id: channelId,
+                last_message_id: message.id,
+                // This ensures the channel is marked as having activity
+            }]
+        });
+        
+        log(`Updated channel state for ${channelId}`);
+    } catch (e) {
+        logError('Failed to update channel state', e);
+    }
+}
+
 // Inject message into Discord - silent parameter prevents notifications on reinjection
 function injectMessage(message: any, silent: boolean = false): boolean {
     if (!FluxDispatcher) {
@@ -341,6 +382,8 @@ function injectMessage(message: any, silent: boolean = false): boolean {
     }
 
     try {
+        // FIX 1 & 2: Changed the dispatch to not use local: true flag
+        // This ensures the DM stays in the list and proper state updates occur
         FluxDispatcher.dispatch({
             type: 'MESSAGE_CREATE',
             channelId: message.channel_id,
@@ -348,14 +391,27 @@ function injectMessage(message: any, silent: boolean = false): boolean {
             optimistic: false,
             sendMessageOptions: {},
             isPushNotification: false,
-            // Add nonce to help Discord identify this as not needing notification
+            // REMOVED local: true to fix DM disappearing from list
+            // Only mark as silent to reduce notification spam
             ...(silent && { 
-                silent: true,
-                local: true 
+                silent: true
             })
         });
 
         log(`Message ${silent ? 'silently ' : ''}injected successfully`, message.id);
+        
+        // FIX 1: After injecting, acknowledge the message to prevent notifications
+        if (silent) {
+            setTimeout(() => {
+                acknowledgeMessages(message.channel_id, message.id);
+            }, 100);
+        }
+        
+        // FIX 2: Update channel state to ensure DM stays visible
+        setTimeout(() => {
+            updateChannelState(message.channel_id, message);
+        }, 150);
+        
         return true;
     } catch (e) {
         logError('Failed to inject message', e);
@@ -484,6 +540,8 @@ function reinjectMessagesForChannel(channelId: string, force: boolean = false) {
     log(`Reinjecting ${messages.length} messages for channel ${channelId}`);
     lastReinjectTime[channelId] = now;
 
+    let latestMessageId = messages[messages.length - 1]?.id;
+
     // Reinject silently to prevent notification spam
     messages.forEach((message: any, index: number) => {
         setTimeout(() => {
@@ -494,6 +552,14 @@ function reinjectMessagesForChannel(channelId: string, force: boolean = false) {
             }
         }, index * 50);
     });
+    
+    // FIX 1: After all messages are reinjected, acknowledge the latest one
+    // This marks the entire channel as read and prevents notification badges
+    if (latestMessageId) {
+        setTimeout(() => {
+            acknowledgeMessages(channelId, latestMessageId);
+        }, messages.length * 50 + 200);
+    }
 }
 
 // Setup message persistence with minimal event triggers
