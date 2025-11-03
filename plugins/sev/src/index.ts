@@ -1,7 +1,7 @@
 /**
  * @name Message Injector
  * @description Inject fake messages in DMs from anyone
- * @version 1.0.0
+ * @version 1.0.1
  */
 import { FluxDispatcher } from "@vendetta/metro/common";
 import { findByProps, findByStoreName } from "@vendetta/metro";
@@ -23,6 +23,8 @@ let ChannelStore: any = null;
 let UserStore: any = null;
 let MessageStore: any = null;
 let SelectedChannelStore: any = null;
+let PrivateChannelStore: any = null;
+let RelationshipStore: any = null;
 let currentChannelId: string | null = null;
 let channelMonitorInterval: any = null;
 let aggressiveMonitorInterval: any = null;
@@ -129,17 +131,57 @@ function findStore(names: string[], methods: string[] = []): any {
     return null;
 }
 
-// Get user info from user ID
-async function getUserInfo(userId: string): Promise<{ username: string; avatar: string | null; discriminator: string }> {
+// Get comprehensive user info including avatar decorations and guild tag
+async function getUserInfo(userId: string): Promise<{ 
+    username: string; 
+    avatar: string | null; 
+    discriminator: string;
+    global_name?: string;
+    avatar_decoration_data?: any;
+    public_flags?: number;
+    clan?: any;
+}> {
     try {
         if (UserStore) {
             const user = UserStore.getUser?.(userId);
             if (user) {
-                return {
+                const info: any = {
                     username: user.username || 'Unknown User',
                     discriminator: user.discriminator || '0',
-                    avatar: user.avatar ? `https://cdn.discordapp.com/avatars/${userId}/${user.avatar}.png` : null
+                    global_name: user.globalName || user.global_name || undefined,
+                    avatar: user.avatar ? `https://cdn.discordapp.com/avatars/${userId}/${user.avatar}.${user.avatar.startsWith('a_') ? 'gif' : 'png'}` : null,
+                    public_flags: user.publicFlags || user.public_flags || 0
                 };
+
+                // Get avatar decoration data
+                if (user.avatarDecorationData || user.avatar_decoration_data) {
+                    const decorationData = user.avatarDecorationData || user.avatar_decoration_data;
+                    info.avatar_decoration_data = {
+                        asset: decorationData.asset,
+                        sku_id: decorationData.skuId || decorationData.sku_id
+                    };
+                } else if (user.avatarDecoration || user.avatar_decoration) {
+                    // Fallback for older format
+                    const decoration = user.avatarDecoration || user.avatar_decoration;
+                    info.avatar_decoration_data = {
+                        asset: decoration,
+                        sku_id: undefined
+                    };
+                }
+
+                // Get clan/primary guild tag (server tags)
+                // Check both clan (legacy) and primaryGuild (current) fields
+                const clanData = user.clan || user.primaryGuild || user.primary_guild;
+                if (clanData) {
+                    info.clan = {
+                        identity_guild_id: clanData.identityGuildId || clanData.identity_guild_id || null,
+                        identity_enabled: clanData.identityEnabled ?? clanData.identity_enabled ?? false,
+                        tag: clanData.tag || null,
+                        badge: clanData.badge || null
+                    };
+                }
+
+                return info;
             }
         }
     } catch (e) {
@@ -149,7 +191,8 @@ async function getUserInfo(userId: string): Promise<{ username: string; avatar: 
     return {
         username: 'Unknown User',
         discriminator: '0',
-        avatar: null
+        avatar: null,
+        public_flags: 0
     };
 }
 
@@ -167,6 +210,54 @@ function getDMChannelId(userId: string): string | null {
     return null;
 }
 
+// Ensure DM channel exists and is in the channel list
+async function ensureDMChannel(userId: string): Promise<string | null> {
+    try {
+        // First, try to get existing DM channel
+        let channelId = getDMChannelId(userId);
+        
+        // If no channel exists, try to create it via opening a DM
+        if (!channelId && PrivateChannelStore) {
+            try {
+                // Try to find or create DM channel
+                const channels = PrivateChannelStore.getPrivateChannelIds?.();
+                if (channels) {
+                    // Check if there's already a DM with this user in the list
+                    for (const id of channels) {
+                        const channel = ChannelStore?.getChannel?.(id);
+                        if (channel?.type === 1 && channel.recipients?.includes(userId)) {
+                            channelId = id;
+                            break;
+                        }
+                    }
+                }
+                
+                // If still no channel, dispatch an action to open/create DM
+                if (!channelId) {
+                    // This simulates opening a DM which should create the channel
+                    FluxDispatcher.dispatch({
+                        type: 'CHANNEL_SELECT',
+                        channelId: null,
+                        guildId: null
+                    });
+                    
+                    await delay(100);
+                    
+                    // Try getting the channel ID again
+                    channelId = getDMChannelId(userId);
+                }
+            } catch (e) {
+                logError('Failed to ensure DM channel', e);
+            }
+        }
+        
+        return channelId;
+    } catch (e) {
+        logError('Failed to ensure DM channel', e);
+        return null;
+    }
+}
+
 // Generate unique message ID (Discord snowflake-like)
 function generateMessageId(): string {
     const timestamp = Date.now();
@@ -174,7 +265,7 @@ function generateMessageId(): string {
     return `${timestamp}${random.toString().padStart(4, '0')}`;
 }
 
-// Create message object with validation
+// Create message object with validation and full user data
 async function createMessageObject(options: {
     channelId: string;
     userId: string;
@@ -191,14 +282,11 @@ async function createMessageObject(options: {
         throw new Error('Invalid user ID');
     }
 
-    let username = options.username;
-    let avatar = options.avatar;
+    // Get full user info including decorations
+    const userInfo = await getUserInfo(options.userId);
     
-    if (!username) {
-        const userInfo = await getUserInfo(options.userId);
-        username = userInfo.username;
-        if (!avatar) avatar = userInfo.avatar ?? undefined;
-    }
+    let username = options.username || userInfo.username;
+    let avatar = options.avatar || userInfo.avatar;
 
     // Validate and sanitize timestamp
     const timestamp = validateTimestamp(options.timestamp);
@@ -212,10 +300,13 @@ async function createMessageObject(options: {
         author: {
             id: options.userId,
             username: username || 'Unknown User',
-            discriminator: '0',
-            avatar: avatar ?? undefined,
-            bot: false,
-            public_flags: 0
+            global_name: userInfo.global_name,
+            discriminator: userInfo.discriminator || '0',
+            avatar: avatar ? avatar.split('/').pop()?.split('.')[0] : null,
+            avatar_decoration_data: userInfo.avatar_decoration_data,
+            clan: userInfo.clan,
+            public_flags: userInfo.public_flags || 0,
+            bot: false
         },
         content: (options.content || '').substring(0, 2000), // Discord message limit
         timestamp: timestamp,
@@ -313,7 +404,9 @@ export async function fakeMessage(options: {
                 if (showToast) showToast('❌ Invalid target user ID', 'Small');
                 return false;
             }
-            channelId = getDMChannelId(options.targetUserId);
+            
+            // Ensure DM channel exists
+            channelId = await ensureDMChannel(options.targetUserId);
         }
 
         if (!channelId) {
@@ -322,7 +415,7 @@ export async function fakeMessage(options: {
             return false;
         }
 
-        // Create message with validation
+        // Create message with validation and full user data
         const message = await createMessageObject({
             channelId,
             userId: options.fromUserId,
@@ -347,6 +440,28 @@ export async function fakeMessage(options: {
 
         if (success) {
             log('Fake message sent successfully');
+            
+            // Ensure the DM appears in the channel list by dispatching a channel select
+            try {
+                FluxDispatcher.dispatch({
+                    type: 'CHANNEL_SELECT',
+                    channelId: channelId,
+                    guildId: null
+                });
+                
+                await delay(50);
+                
+                // Then switch back to whatever was selected before
+                if (currentChannelId && currentChannelId !== channelId) {
+                    FluxDispatcher.dispatch({
+                        type: 'CHANNEL_SELECT',
+                        channelId: currentChannelId,
+                        guildId: null
+                    });
+                }
+            } catch (e) {
+                log('Could not ensure channel visibility', e);
+            }
         }
 
         return success;
@@ -439,7 +554,8 @@ function setupMessagePersistence() {
             // Reinject on cache/overlay events
             if (event.type === 'CACHE_LOADED' ||
                 event.type === 'OVERLAY_INITIALIZE' ||
-                event.type === 'CHANNEL_UPDATES') {
+                event.type === 'CHANNEL_UPDATES' ||
+                event.type === 'CONNECTION_OPEN') {
                 if (currentChannelId && storage.persistentMessages[currentChannelId]) {
                     setTimeout(() => currentChannelId && reinjectMessagesForChannel(currentChannelId), 300);
                 }
@@ -543,6 +659,8 @@ async function initModules() {
         UserStore = findStore(['UserStore', 'CurrentUserStore'], ['getUser', 'getCurrentUser']);
         MessageStore = findStore(['MessageStore'], ['getMessages', 'getMessage']);
         SelectedChannelStore = findStore(['SelectedChannelStore'], ['getChannelId']);
+        PrivateChannelStore = findStore(['PrivateChannelStore'], ['getPrivateChannelIds']);
+        RelationshipStore = findStore(['RelationshipStore'], ['getRelationships']);
 
         const ready = ChannelStore && UserStore;
 
@@ -642,7 +760,7 @@ export default {
             };
 
             logger.log('[MessageInjector] ✅ Loaded successfully');
-            if (showToast) showToast('✅ Message Injector loaded!', 'Check');
+            // REMOVED: Load notification toast
 
         } catch (e) {
             logError('Fatal error during load', e);
