@@ -358,7 +358,7 @@ __MESSAGE_FAKER__.fakeMessage({
             </FormSection>
 
             <FormText style={[styles.infoText, { marginTop: 16, marginBottom: 32, textAlign: "center" as const }]}>
-                MessageFaker v1.0.0 for Kettu/Bunny/Vendetta
+                MessageFaker v1.0.1 for Kettu/Bunny/Vendetta
             </FormText>
         </ScrollView>
     );
