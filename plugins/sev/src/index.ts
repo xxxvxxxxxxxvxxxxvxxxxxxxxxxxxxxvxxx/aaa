@@ -1,7 +1,7 @@
 /**
  * @name Message Injector
- * @description Inject fake messages in DMs from anyone
- * @version 1.0.3
+ * @description Inject fake messages in DMs
+ * @version 3.0.0
  */
 import { FluxDispatcher } from "@vendetta/metro/common";
 import { findByProps, findByStoreName } from "@vendetta/metro";
@@ -17,6 +17,7 @@ storage.debug ??= false;
 storage.persistentMessages ??= {};
 storage.autoInjectOnStartup ??= true;
 storage.preventMessageDeletion ??= true;
+storage.testedParameters ??= {}; // Store what works
 
 const unpatches: (() => void)[] = [];
 let ChannelStore: any = null;
@@ -28,12 +29,19 @@ let RelationshipStore: any = null;
 let currentChannelId: string | null = null;
 let channelMonitorInterval: any = null;
 
-// Track last injection time per channel to debounce aggressively
-const lastReinjectTime: { [channelId: string]: number } = {};
-const REINJECT_DEBOUNCE_MS = 3000; // Minimum 3 seconds between reinjections
-
-// Track if we're in startup mode to only inject once
-let isStartupComplete = false;
+// Track which injection methods work
+const injectionResults = {
+    basicMessageCreate: { tested: false, works: false, notificationCount: 0 },
+    messageCreateWithLocal: { tested: false, works: false, notificationCount: 0 },
+    messageCreateWithSilent: { tested: false, works: false, notificationCount: 0 },
+    messageCreateWithCached: { tested: false, works: false, notificationCount: 0 },
+    loadMessagesSuccess: { tested: false, works: false, notificationCount: 0 },
+    loadMessagesSuccessWithCached: { tested: false, works: false, notificationCount: 0 },
+    channelAckBasic: { tested: false, works: false },
+    channelAckWithManual: { tested: false, works: false },
+    channelAckWithLocal: { tested: false, works: false },
+    channelAckWithBoth: { tested: false, works: false }
+};
 
 // Logging helpers
 const log = (msg: string, data?: any) => {
@@ -73,7 +81,6 @@ function validateUserId(userId: string): boolean {
     if (!userId || typeof userId !== 'string') {
         return false;
     }
-    // Discord snowflake IDs are numeric strings
     return /^\d+$/.test(userId.trim());
 }
 
@@ -137,7 +144,7 @@ function findStore(names: string[], methods: string[] = []): any {
     return null;
 }
 
-// Get comprehensive user info including avatar decorations and guild tag
+// Get user info
 async function getUserInfo(userId: string): Promise<{ 
     username: string; 
     avatar: string | null; 
@@ -159,7 +166,6 @@ async function getUserInfo(userId: string): Promise<{
                     public_flags: user.publicFlags || user.public_flags || 0
                 };
 
-                // Get avatar decoration data
                 if (user.avatarDecorationData || user.avatar_decoration_data) {
                     const decorationData = user.avatarDecorationData || user.avatar_decoration_data;
                     info.avatar_decoration_data = {
@@ -167,7 +173,6 @@ async function getUserInfo(userId: string): Promise<{
                         sku_id: decorationData.skuId || decorationData.sku_id
                     };
                 } else if (user.avatarDecoration || user.avatar_decoration) {
-                    // Fallback for older format
                     const decoration = user.avatarDecoration || user.avatar_decoration;
                     info.avatar_decoration_data = {
                         asset: decoration,
@@ -175,8 +180,6 @@ async function getUserInfo(userId: string): Promise<{
                     };
                 }
 
-                // Get clan/primary guild tag (server tags)
-                // Check both clan (legacy) and primaryGuild (current) fields
                 const clanData = user.clan || user.primaryGuild || user.primary_guild;
                 if (clanData) {
                     info.clan = {
@@ -216,19 +219,15 @@ function getDMChannelId(userId: string): string | null {
     return null;
 }
 
-// Ensure DM channel exists and is in the channel list
+// Ensure DM channel exists
 async function ensureDMChannel(userId: string): Promise<string | null> {
     try {
-        // First, try to get existing DM channel
         let channelId = getDMChannelId(userId);
         
-        // If no channel exists, try to create it via opening a DM
         if (!channelId && PrivateChannelStore) {
             try {
-                // Try to find or create DM channel
                 const channels = PrivateChannelStore.getPrivateChannelIds?.();
                 if (channels) {
-                    // Check if there's already a DM with this user in the list
                     for (const id of channels) {
                         const channel = ChannelStore?.getChannel?.(id);
                         if (channel?.type === 1 && channel.recipients?.includes(userId)) {
@@ -238,9 +237,7 @@ async function ensureDMChannel(userId: string): Promise<string | null> {
                     }
                 }
                 
-                // If still no channel, dispatch an action to open/create DM
                 if (!channelId) {
-                    // This simulates opening a DM which should create the channel
                     FluxDispatcher.dispatch({
                         type: 'CHANNEL_SELECT',
                         channelId: null,
@@ -248,8 +245,6 @@ async function ensureDMChannel(userId: string): Promise<string | null> {
                     });
                     
                     await delay(100);
-                    
-                    // Try getting the channel ID again
                     channelId = getDMChannelId(userId);
                 }
             } catch (e) {
@@ -264,14 +259,14 @@ async function ensureDMChannel(userId: string): Promise<string | null> {
     }
 }
 
-// Generate unique message ID (Discord snowflake-like)
+// Generate unique message ID
 function generateMessageId(): string {
     const timestamp = Date.now();
     const random = Math.floor(Math.random() * 4096);
     return `${timestamp}${random.toString().padStart(4, '0')}`;
 }
 
-// Create message object with validation and full user data
+// Create message object
 async function createMessageObject(options: {
     channelId: string;
     userId: string;
@@ -283,21 +278,16 @@ async function createMessageObject(options: {
     messageId?: string;
 }): Promise<any> {
 
-    // Validate user ID
     if (!validateUserId(options.userId)) {
         throw new Error('Invalid user ID');
     }
 
-    // Get full user info including decorations
     const userInfo = await getUserInfo(options.userId);
     
     let username = options.username || userInfo.username;
     let avatar = options.avatar || userInfo.avatar;
 
-    // Validate and sanitize timestamp
     const timestamp = validateTimestamp(options.timestamp);
-
-    // Validate embed
     const validEmbed = validateEmbed(options.embed);
 
     const message = {
@@ -314,7 +304,7 @@ async function createMessageObject(options: {
             public_flags: userInfo.public_flags || 0,
             bot: false
         },
-        content: (options.content || '').substring(0, 2000), // Discord message limit
+        content: (options.content || '').substring(0, 2000),
         timestamp: timestamp,
         edited_timestamp: null,
         tts: false,
@@ -333,85 +323,177 @@ async function createMessageObject(options: {
     return message;
 }
 
-// FIX 1: Acknowledge messages to mark as read and prevent notifications
-function acknowledgeMessages(channelId: string, messageId: string) {
+// DYNAMIC TESTING: Try different injection methods
+async function testInjectionMethod(message: any, method: string): Promise<boolean> {
+    if (!FluxDispatcher) return false;
+
     try {
-        if (!FluxDispatcher) return;
-        
-        // Dispatch MESSAGE_ACK to mark the channel as read up to this message
-        FluxDispatcher.dispatch({
-            type: 'MESSAGE_ACK',
-            channelId: channelId,
-            messageId: messageId,
-            manual: false,
-            local: true
-        });
-        
-        log(`Acknowledged message ${messageId} in channel ${channelId}`);
+        switch (method) {
+            case 'basicMessageCreate':
+                FluxDispatcher.dispatch({
+                    type: 'MESSAGE_CREATE',
+                    channelId: message.channel_id,
+                    message: message,
+                    optimistic: false
+                });
+                break;
+
+            case 'messageCreateWithLocal':
+                FluxDispatcher.dispatch({
+                    type: 'MESSAGE_CREATE',
+                    channelId: message.channel_id,
+                    message: message,
+                    optimistic: false,
+                    local: true
+                });
+                break;
+
+            case 'messageCreateWithSilent':
+                FluxDispatcher.dispatch({
+                    type: 'MESSAGE_CREATE',
+                    channelId: message.channel_id,
+                    message: message,
+                    optimistic: false,
+                    silent: true
+                });
+                break;
+
+            case 'messageCreateWithCached':
+                FluxDispatcher.dispatch({
+                    type: 'MESSAGE_CREATE',
+                    channelId: message.channel_id,
+                    message: message,
+                    optimistic: false,
+                    cached: true
+                });
+                break;
+
+            case 'loadMessagesSuccess':
+                FluxDispatcher.dispatch({
+                    type: 'LOAD_MESSAGES_SUCCESS',
+                    channelId: message.channel_id,
+                    messages: [message],
+                    isBefore: false,
+                    isAfter: false
+                });
+                break;
+
+            case 'loadMessagesSuccessWithCached':
+                FluxDispatcher.dispatch({
+                    type: 'LOAD_MESSAGES_SUCCESS',
+                    channelId: message.channel_id,
+                    messages: [message],
+                    isBefore: false,
+                    isAfter: false,
+                    cached: true
+                });
+                break;
+
+            default:
+                return false;
+        }
+
+        log(`Tested injection method: ${method}`);
+        return true;
     } catch (e) {
-        logError('Failed to acknowledge message', e);
+        logError(`Failed to test ${method}`, e);
+        return false;
     }
 }
 
-// FIX 2: Update channel state to keep DM in list
-function updateChannelState(channelId: string, message: any) {
+// DYNAMIC TESTING: Try different ACK methods
+async function testAckMethod(channelId: string, messageId: string, method: string): Promise<boolean> {
+    if (!FluxDispatcher) return false;
+
     try {
-        if (!FluxDispatcher) return;
-        
-        // Dispatch CHANNEL_UPDATES to ensure the channel stays in the DM list
-        FluxDispatcher.dispatch({
-            type: 'CHANNEL_UPDATES',
-            channels: [{
-                id: channelId,
-                last_message_id: message.id,
-                // This ensures the channel is marked as having activity
-            }]
-        });
-        
-        log(`Updated channel state for ${channelId}`);
+        switch (method) {
+            case 'channelAckBasic':
+                FluxDispatcher.dispatch({
+                    type: 'CHANNEL_ACK',
+                    channelId: channelId,
+                    messageId: messageId
+                });
+                break;
+
+            case 'channelAckWithManual':
+                FluxDispatcher.dispatch({
+                    type: 'CHANNEL_ACK',
+                    channelId: channelId,
+                    messageId: messageId,
+                    manual: true
+                });
+                break;
+
+            case 'channelAckWithLocal':
+                FluxDispatcher.dispatch({
+                    type: 'CHANNEL_ACK',
+                    channelId: channelId,
+                    messageId: messageId,
+                    local: true
+                });
+                break;
+
+            case 'channelAckWithBoth':
+                FluxDispatcher.dispatch({
+                    type: 'CHANNEL_ACK',
+                    channelId: channelId,
+                    messageId: messageId,
+                    manual: true,
+                    local: true
+                });
+                break;
+
+            default:
+                return false;
+        }
+
+        log(`Tested ACK method: ${method}`);
+        return true;
     } catch (e) {
-        logError('Failed to update channel state', e);
+        logError(`Failed to test ${method}`, e);
+        return false;
     }
 }
 
-// Inject message into Discord - silent parameter prevents notifications on reinjection
-function injectMessage(message: any, silent: boolean = false): boolean {
+// Inject message using the best known method
+function injectMessage(message: any): boolean {
     if (!FluxDispatcher) {
         logError('FluxDispatcher not available');
         return false;
     }
 
     try {
-        // FIX 1 & 2: Changed the dispatch to not use local: true flag
-        // This ensures the DM stays in the list and proper state updates occur
-        FluxDispatcher.dispatch({
-            type: 'MESSAGE_CREATE',
-            channelId: message.channel_id,
-            message: message,
-            optimistic: false,
-            sendMessageOptions: {},
-            isPushNotification: false,
-            // REMOVED local: true to fix DM disappearing from list
-            // Only mark as silent to reduce notification spam
-            ...(silent && { 
-                silent: true
-            })
-        });
-
-        log(`Message ${silent ? 'silently ' : ''}injected successfully`, message.id);
+        // Use proven method if we've tested it
+        const bestMethod = getBestInjectionMethod();
         
-        // FIX 1: After injecting, acknowledge the message to prevent notifications
-        if (silent) {
-            setTimeout(() => {
-                acknowledgeMessages(message.channel_id, message.id);
-            }, 100);
+        if (bestMethod === 'loadMessagesSuccess') {
+            FluxDispatcher.dispatch({
+                type: 'LOAD_MESSAGES_SUCCESS',
+                channelId: message.channel_id,
+                messages: [message],
+                isBefore: false,
+                isAfter: false
+            });
+        } else if (bestMethod === 'loadMessagesSuccessWithCached') {
+            FluxDispatcher.dispatch({
+                type: 'LOAD_MESSAGES_SUCCESS',
+                channelId: message.channel_id,
+                messages: [message],
+                isBefore: false,
+                isAfter: false,
+                cached: true
+            });
+        } else {
+            // Default to basic MESSAGE_CREATE (proven to work)
+            FluxDispatcher.dispatch({
+                type: 'MESSAGE_CREATE',
+                channelId: message.channel_id,
+                message: message,
+                optimistic: false
+            });
         }
-        
-        // FIX 2: Update channel state to ensure DM stays visible
-        setTimeout(() => {
-            updateChannelState(message.channel_id, message);
-        }, 150);
-        
+
+        log('Message injected successfully', message.id);
         return true;
     } catch (e) {
         logError('Failed to inject message', e);
@@ -419,15 +501,31 @@ function injectMessage(message: any, silent: boolean = false): boolean {
     }
 }
 
-// Save persistent messages to storage with error recovery
+// Get the best injection method based on testing
+function getBestInjectionMethod(): string {
+    // Prefer methods with lower notification count
+    const methods = Object.entries(injectionResults)
+        .filter(([key, result]) => 
+            result.tested && 
+            result.works && 
+            key.includes('message') || key.includes('load')
+        )
+        .sort((a, b) => {
+            const aCount = (a[1] as any).notificationCount || 0;
+            const bCount = (b[1] as any).notificationCount || 0;
+            return aCount - bCount;
+        });
+
+    return methods.length > 0 ? methods[0][0] : 'basicMessageCreate';
+}
+
+// Save persistent messages
 function savePersistentMessages() {
     try {
-        // Validate storage before saving
         if (typeof storage.persistentMessages !== 'object') {
             storage.persistentMessages = {};
         }
 
-        // Remove any corrupted entries
         Object.keys(storage.persistentMessages).forEach(channelId => {
             if (!Array.isArray(storage.persistentMessages[channelId])) {
                 delete storage.persistentMessages[channelId];
@@ -435,10 +533,10 @@ function savePersistentMessages() {
         });
 
         storage.persistentMessages = JSON.parse(JSON.stringify(storage.persistentMessages));
-        log('Saved persistent messages', Object.keys(storage.persistentMessages).length);
+        storage.testedParameters = injectionResults;
+        log('Saved persistent messages and test results');
     } catch (e) {
         logError('Failed to save persistent messages', e);
-        // Recovery: reset storage if corrupted
         storage.persistentMessages = {};
     }
 }
@@ -456,14 +554,12 @@ export async function fakeMessage(options: {
 }): Promise<boolean> {
 
     try {
-        // Validate sender user ID
         if (!validateUserId(options.fromUserId)) {
             logError('Invalid sender user ID');
             if (showToast) showToast('❌ Invalid sender user ID', 'Small');
             return false;
         }
 
-        // Get channel ID
         let channelId = options.channelId;
         if (!channelId && options.targetUserId) {
             if (!validateUserId(options.targetUserId)) {
@@ -472,7 +568,6 @@ export async function fakeMessage(options: {
                 return false;
             }
             
-            // Ensure DM channel exists
             channelId = await ensureDMChannel(options.targetUserId);
         }
 
@@ -482,7 +577,6 @@ export async function fakeMessage(options: {
             return false;
         }
 
-        // Create message with validation and full user data
         const message = await createMessageObject({
             channelId,
             userId: options.fromUserId,
@@ -492,7 +586,6 @@ export async function fakeMessage(options: {
             embed: options.embed
         });
 
-        // Save to persistent storage if requested
         if (options.persistent) {
             if (!storage.persistentMessages[channelId]) {
                 storage.persistentMessages[channelId] = [];
@@ -502,8 +595,7 @@ export async function fakeMessage(options: {
             log('Message saved to persistent storage', message.id);
         }
 
-        // Inject the message (not silent for new messages)
-        const success = injectMessage(message, false);
+        const success = injectMessage(message);
 
         if (success) {
             log('Fake message sent successfully');
@@ -517,20 +609,12 @@ export async function fakeMessage(options: {
     }
 }
 
-// Reinject all messages for a specific channel with aggressive debouncing
-function reinjectMessagesForChannel(channelId: string, force: boolean = false) {
+// Reinject messages for a channel
+function reinjectMessagesForChannel(channelId: string) {
     if (!storage.persistentMessages[channelId]) return;
-
-    // Aggressive debounce: don't reinject if we've done it recently (unless forced)
-    const now = Date.now();
-    if (!force && lastReinjectTime[channelId] && (now - lastReinjectTime[channelId]) < REINJECT_DEBOUNCE_MS) {
-        log(`Skipping reinject for ${channelId} - too soon (${now - lastReinjectTime[channelId]}ms ago)`);
-        return;
-    }
 
     const messages = storage.persistentMessages[channelId];
     
-    // Validate messages array
     if (!Array.isArray(messages)) {
         delete storage.persistentMessages[channelId];
         savePersistentMessages();
@@ -538,31 +622,19 @@ function reinjectMessagesForChannel(channelId: string, force: boolean = false) {
     }
 
     log(`Reinjecting ${messages.length} messages for channel ${channelId}`);
-    lastReinjectTime[channelId] = now;
 
-    let latestMessageId = messages[messages.length - 1]?.id;
-
-    // Reinject silently to prevent notification spam
     messages.forEach((message: any, index: number) => {
         setTimeout(() => {
             try {
-                injectMessage(message, true); // Silent = true for reinjections
+                injectMessage(message);
             } catch (e) {
                 logError('Failed to reinject message', e);
             }
         }, index * 50);
     });
-    
-    // FIX 1: After all messages are reinjected, acknowledge the latest one
-    // This marks the entire channel as read and prevents notification badges
-    if (latestMessageId) {
-        setTimeout(() => {
-            acknowledgeMessages(channelId, latestMessageId);
-        }, messages.length * 50 + 200);
-    }
 }
 
-// Setup message persistence with minimal event triggers
+// Setup message persistence
 function setupMessagePersistence() {
     try {
         if (!FluxDispatcher) return;
@@ -573,7 +645,6 @@ function setupMessagePersistence() {
             const event = args[0];
             if (!event || !event.type) return;
 
-            // Prevent deletion of fake messages
             if (storage.preventMessageDeletion && event.type === 'MESSAGE_DELETE') {
                 const messageId = event.id;
                 const channelId = event.channelId;
@@ -585,12 +656,11 @@ function setupMessagePersistence() {
                     if (fakeMessage) {
                         log('Prevented deletion of fake message', messageId);
                         args[0] = { type: 'NOOP' };
-                        setTimeout(() => injectMessage(fakeMessage, true), 100);
+                        setTimeout(() => injectMessage(fakeMessage), 100);
                     }
                 }
             }
 
-            // Handle bulk deletions
             if (storage.preventMessageDeletion && event.type === 'MESSAGE_DELETE_BULK') {
                 const channelId = event.channelId;
                 if (channelId && storage.persistentMessages[channelId]) {
@@ -600,41 +670,65 @@ function setupMessagePersistence() {
 
                     if (hasFake) {
                         args[0] = { type: 'NOOP' };
-                        setTimeout(() => reinjectMessagesForChannel(channelId, true), 200);
+                        setTimeout(() => reinjectMessagesForChannel(channelId), 200);
                     }
                 }
             }
 
-            // Only reinject on actual message loads (when switching channels or loading history)
-            if (event.type === 'LOAD_MESSAGES_SUCCESS') {
+            if (event.type === 'CHANNEL_SELECT') {
                 const channelId = event.channelId;
                 if (channelId && storage.persistentMessages[channelId]) {
-                    // Single delayed reinject after load
+                    setTimeout(() => reinjectMessagesForChannel(channelId), 300);
+                }
+            }
+
+            if (event.type === 'LOAD_MESSAGES_SUCCESS' || 
+                event.type === 'LOAD_MESSAGES' ||
+                event.type === 'LOCAL_MESSAGES_LOADED') {
+                const channelId = event.channelId;
+                if (channelId && storage.persistentMessages[channelId]) {
                     setTimeout(() => reinjectMessagesForChannel(channelId), 500);
                 }
             }
 
-            // Reinject only on app connection open (app restart)
-            if (event.type === 'CONNECTION_OPEN' && isStartupComplete) {
-                // Reinject for all channels on reconnect
-                Object.keys(storage.persistentMessages).forEach(channelId => {
-                    setTimeout(() => {
-                        reinjectMessagesForChannel(channelId, true);
-                    }, 1000);
-                });
+            if (event.type === 'MESSAGE_UPDATE') {
+                const channelId = event.message?.channel_id;
+                const messageId = event.message?.id;
+                
+                if (channelId && messageId && storage.persistentMessages[channelId]) {
+                    const messages = storage.persistentMessages[channelId];
+                    if (Array.isArray(messages)) {
+                        const isFakeMessage = messages.some(m => m && m.id === messageId);
+                        
+                        if (!isFakeMessage) {
+                            setTimeout(() => reinjectMessagesForChannel(channelId), 100);
+                        }
+                    }
+                }
+            }
+
+            if (event.type === 'CHANNEL_UPDATES' || 
+                event.type === 'CACHE_LOADED' ||
+                event.type === 'OVERLAY_INITIALIZE' ||
+                event.type === 'CONNECTION_OPEN') {
+                if (SelectedChannelStore) {
+                    const currentChan = SelectedChannelStore.getChannelId?.();
+                    if (currentChan && storage.persistentMessages[currentChan]) {
+                        setTimeout(() => reinjectMessagesForChannel(currentChan), 600);
+                    }
+                }
             }
         });
 
         unpatches.push(unpatch);
-        log('Message persistence system setup with minimal event coverage');
+        log('Message persistence system setup');
     } catch (e) {
         logError('Failed to setup message persistence', e);
     }
 }
 
-// Monitor channel changes ONLY (no aggressive reinjection)
+// Monitor channel changes
 function startChannelMonitoring() {
-    // Only monitor for channel switches
     channelMonitorInterval = setInterval(() => {
         if (!SelectedChannelStore) return;
 
@@ -646,7 +740,6 @@ function startChannelMonitoring() {
 
                 log(`Channel switched from ${previousChannel} to ${selectedChannel}`);
 
-                // Only reinject when switching TO a channel with fake messages
                 if (storage.persistentMessages[selectedChannel]) {
                     setTimeout(() => {
                         reinjectMessagesForChannel(selectedChannel);
@@ -690,6 +783,49 @@ export async function quickTest(targetUserId: string, fromUserId: string) {
     });
 }
 
+// Run parameter tests
+export async function runParameterTests(targetUserId: string, fromUserId: string) {
+    log('Starting parameter tests...');
+    
+    const channelId = await ensureDMChannel(targetUserId);
+    if (!channelId) {
+        logError('Cannot run tests: No DM channel');
+        if (showToast) showToast('❌ Cannot run tests: No DM channel', 'Small');
+        return;
+    }
+
+    const testMessage = await createMessageObject({
+        channelId,
+        userId: fromUserId,
+        content: '🧪 Testing injection parameters...',
+        username: 'Test Bot'
+    });
+
+    // Test each injection method
+    for (const method of ['basicMessageCreate', 'messageCreateWithLocal', 'messageCreateWithSilent', 
+                          'messageCreateWithCached', 'loadMessagesSuccess', 'loadMessagesSuccessWithCached']) {
+        const testMsg = { ...testMessage, id: generateMessageId(), content: `🧪 Test: ${method}` };
+        const result = await testInjectionMethod(testMsg, method);
+        (injectionResults as any)[method].tested = true;
+        (injectionResults as any)[method].works = result;
+        await delay(1000);
+    }
+
+    // Test ACK methods
+    const lastMessageId = testMessage.id;
+    for (const method of ['channelAckBasic', 'channelAckWithManual', 'channelAckWithLocal', 'channelAckWithBoth']) {
+        const result = await testAckMethod(channelId, lastMessageId, method);
+        (injectionResults as any)[method].tested = true;
+        (injectionResults as any)[method].works = result;
+        await delay(500);
+    }
+
+    savePersistentMessages();
+    log('Parameter tests complete', injectionResults);
+    
+    if (showToast) showToast('✅ Tests complete! Check console for results', 'Check');
+}
+
 // Initialize modules
 async function initModules() {
     try {
@@ -724,17 +860,14 @@ function recoverStorage() {
             return;
         }
 
-        // Clean up invalid entries
         Object.keys(storage.persistentMessages).forEach(channelId => {
             if (!Array.isArray(storage.persistentMessages[channelId])) {
                 delete storage.persistentMessages[channelId];
             } else {
-                // Validate each message has required fields
                 storage.persistentMessages[channelId] = storage.persistentMessages[channelId].filter((msg: any) => {
                     return msg && msg.id && msg.channel_id && msg.author && msg.timestamp;
                 });
 
-                // Remove empty arrays
                 if (storage.persistentMessages[channelId].length === 0) {
                     delete storage.persistentMessages[channelId];
                 }
@@ -752,10 +885,15 @@ function recoverStorage() {
 export default {
     onLoad: async () => {
         try {
-            logger.log('[MessageInjector] Loading...');
+            logger.log('[MessageInjector] Loading (Self-Testing Edition)...');
 
-            // Recover from any storage corruption
             recoverStorage();
+
+            // Load previous test results
+            if (storage.testedParameters) {
+                Object.assign(injectionResults, storage.testedParameters);
+                log('Loaded previous test results', injectionResults);
+            }
 
             await delay(1000);
 
@@ -769,7 +907,6 @@ export default {
             setupMessagePersistence();
             startChannelMonitoring();
 
-            // Do initial injection only once on startup
             if (storage.autoInjectOnStartup) {
                 await delay(2000);
                 const channelCount = Object.keys(storage.persistentMessages).length;
@@ -777,18 +914,10 @@ export default {
                     log(`Auto-injecting messages for ${channelCount} channels on startup`);
                     Object.keys(storage.persistentMessages).forEach(channelId => {
                         setTimeout(() => {
-                            reinjectMessagesForChannel(channelId, true);
+                            reinjectMessagesForChannel(channelId);
                         }, 500);
                     });
                 }
-                
-                // Mark startup complete after initial injection
-                setTimeout(() => {
-                    isStartupComplete = true;
-                    log('Startup injection complete');
-                }, 3000);
-            } else {
-                isStartupComplete = true;
             }
 
             // Expose API to window for console access
@@ -798,15 +927,27 @@ export default {
                 clearChannelMessages,
                 getAllMessages,
                 quickTest,
-                reinjectChannel: (channelId: string) => reinjectMessagesForChannel(channelId, true),
+                runParameterTests,
+                reinjectChannel: (channelId: string) => reinjectMessagesForChannel(channelId),
+                reinjectAll: () => {
+                    Object.keys(storage.persistentMessages).forEach(channelId => {
+                        reinjectMessagesForChannel(channelId);
+                    });
+                },
                 getStatus: () => ({
                     enabled: storage.enabled,
                     messageCount: Object.values(storage.persistentMessages).reduce((acc: number, msgs: any) => acc + msgs.length, 0),
-                    channelCount: Object.keys(storage.persistentMessages).length
-                })
+                    channelCount: Object.keys(storage.persistentMessages).length,
+                    testResults: injectionResults
+                }),
+                getTestResults: () => injectionResults,
+                testInjection: async (targetUserId: string, fromUserId: string) => {
+                    await runParameterTests(targetUserId, fromUserId);
+                }
             };
 
-            logger.log('[MessageInjector] ✅ Loaded successfully');
+            logger.log('[MessageInjector] ✅ Loaded successfully (Self-Testing Edition)');
+            logger.log('[MessageInjector] Use __MESSAGE_FAKER__.testInjection(targetUserId, fromUserId) to test parameters');
 
         } catch (e) {
             logError('Fatal error during load', e);
