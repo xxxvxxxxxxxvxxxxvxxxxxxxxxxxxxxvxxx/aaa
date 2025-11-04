@@ -1,11 +1,11 @@
 /**
  * @name Message Injector
- * @description Inject fake messages with DM List Persistence
- * @version 4.0.0
+ * @description Inject fake messages in DMs
+ * @version 3.0.0
  */
 import { FluxDispatcher } from "@vendetta/metro/common";
 import { findByProps, findByStoreName } from "@vendetta/metro";
-import { before, after } from "@vendetta/patcher";
+import { before } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 import { showToast } from "@vendetta/ui/toasts";
 import { logger } from "@vendetta";
@@ -17,7 +17,7 @@ storage.debug ??= false;
 storage.persistentMessages ??= {};
 storage.autoInjectOnStartup ??= true;
 storage.preventMessageDeletion ??= true;
-storage.fakeDMChannels ??= {}; // Track which channels should stay in DM list
+storage.testedParameters ??= {}; // Store what works
 
 const unpatches: (() => void)[] = [];
 let ChannelStore: any = null;
@@ -28,6 +28,20 @@ let PrivateChannelStore: any = null;
 let RelationshipStore: any = null;
 let currentChannelId: string | null = null;
 let channelMonitorInterval: any = null;
+
+// Track which injection methods work
+const injectionResults = {
+    basicMessageCreate: { tested: false, works: false, notificationCount: 0 },
+    messageCreateWithLocal: { tested: false, works: false, notificationCount: 0 },
+    messageCreateWithSilent: { tested: false, works: false, notificationCount: 0 },
+    messageCreateWithCached: { tested: false, works: false, notificationCount: 0 },
+    loadMessagesSuccess: { tested: false, works: false, notificationCount: 0 },
+    loadMessagesSuccessWithCached: { tested: false, works: false, notificationCount: 0 },
+    channelAckBasic: { tested: false, works: false },
+    channelAckWithManual: { tested: false, works: false },
+    channelAckWithLocal: { tested: false, works: false },
+    channelAckWithBoth: { tested: false, works: false }
+};
 
 // Logging helpers
 const log = (msg: string, data?: any) => {
@@ -309,7 +323,139 @@ async function createMessageObject(options: {
     return message;
 }
 
-// Inject message
+// DYNAMIC TESTING: Try different injection methods
+async function testInjectionMethod(message: any, method: string): Promise<boolean> {
+    if (!FluxDispatcher) return false;
+
+    try {
+        switch (method) {
+            case 'basicMessageCreate':
+                FluxDispatcher.dispatch({
+                    type: 'MESSAGE_CREATE',
+                    channelId: message.channel_id,
+                    message: message,
+                    optimistic: false
+                });
+                break;
+
+            case 'messageCreateWithLocal':
+                FluxDispatcher.dispatch({
+                    type: 'MESSAGE_CREATE',
+                    channelId: message.channel_id,
+                    message: message,
+                    optimistic: false,
+                    local: true
+                });
+                break;
+
+            case 'messageCreateWithSilent':
+                FluxDispatcher.dispatch({
+                    type: 'MESSAGE_CREATE',
+                    channelId: message.channel_id,
+                    message: message,
+                    optimistic: false,
+                    silent: true
+                });
+                break;
+
+            case 'messageCreateWithCached':
+                FluxDispatcher.dispatch({
+                    type: 'MESSAGE_CREATE',
+                    channelId: message.channel_id,
+                    message: message,
+                    optimistic: false,
+                    cached: true
+                });
+                break;
+
+            case 'loadMessagesSuccess':
+                FluxDispatcher.dispatch({
+                    type: 'LOAD_MESSAGES_SUCCESS',
+                    channelId: message.channel_id,
+                    messages: [message],
+                    isBefore: false,
+                    isAfter: false
+                });
+                break;
+
+            case 'loadMessagesSuccessWithCached':
+                FluxDispatcher.dispatch({
+                    type: 'LOAD_MESSAGES_SUCCESS',
+                    channelId: message.channel_id,
+                    messages: [message],
+                    isBefore: false,
+                    isAfter: false,
+                    cached: true
+                });
+                break;
+
+            default:
+                return false;
+        }
+
+        log(`Tested injection method: ${method}`);
+        return true;
+    } catch (e) {
+        logError(`Failed to test ${method}`, e);
+        return false;
+    }
+}
+
+// DYNAMIC TESTING: Try different ACK methods
+async function testAckMethod(channelId: string, messageId: string, method: string): Promise<boolean> {
+    if (!FluxDispatcher) return false;
+
+    try {
+        switch (method) {
+            case 'channelAckBasic':
+                FluxDispatcher.dispatch({
+                    type: 'CHANNEL_ACK',
+                    channelId: channelId,
+                    messageId: messageId
+                });
+                break;
+
+            case 'channelAckWithManual':
+                FluxDispatcher.dispatch({
+                    type: 'CHANNEL_ACK',
+                    channelId: channelId,
+                    messageId: messageId,
+                    manual: true
+                });
+                break;
+
+            case 'channelAckWithLocal':
+                FluxDispatcher.dispatch({
+                    type: 'CHANNEL_ACK',
+                    channelId: channelId,
+                    messageId: messageId,
+                    local: true
+                });
+                break;
+
+            case 'channelAckWithBoth':
+                FluxDispatcher.dispatch({
+                    type: 'CHANNEL_ACK',
+                    channelId: channelId,
+                    messageId: messageId,
+                    manual: true,
+                    local: true
+                });
+                break;
+
+            default:
+                return false;
+        }
+
+        log(`Tested ACK method: ${method}`);
+        return true;
+    } catch (e) {
+        logError(`Failed to test ${method}`, e);
+        return false;
+    }
+}
+
+// Inject message using the best known method
 function injectMessage(message: any): boolean {
     if (!FluxDispatcher) {
         logError('FluxDispatcher not available');
@@ -317,12 +463,35 @@ function injectMessage(message: any): boolean {
     }
 
     try {
-        FluxDispatcher.dispatch({
-            type: 'MESSAGE_CREATE',
-            channelId: message.channel_id,
-            message: message,
-            optimistic: false
-        });
+        // Use proven method if we've tested it
+        const bestMethod = getBestInjectionMethod();
+        
+        if (bestMethod === 'loadMessagesSuccess') {
+            FluxDispatcher.dispatch({
+                type: 'LOAD_MESSAGES_SUCCESS',
+                channelId: message.channel_id,
+                messages: [message],
+                isBefore: false,
+                isAfter: false
+            });
+        } else if (bestMethod === 'loadMessagesSuccessWithCached') {
+            FluxDispatcher.dispatch({
+                type: 'LOAD_MESSAGES_SUCCESS',
+                channelId: message.channel_id,
+                messages: [message],
+                isBefore: false,
+                isAfter: false,
+                cached: true
+            });
+        } else {
+            // Default to basic MESSAGE_CREATE (proven to work)
+            FluxDispatcher.dispatch({
+                type: 'MESSAGE_CREATE',
+                channelId: message.channel_id,
+                message: message,
+                optimistic: false
+            });
+        }
 
         log('Message injected successfully', message.id);
         return true;
@@ -330,6 +499,24 @@ function injectMessage(message: any): boolean {
         logError('Failed to inject message', e);
         return false;
     }
+}
+
+// Get the best injection method based on testing
+function getBestInjectionMethod(): string {
+    // Prefer methods with lower notification count
+    const methods = Object.entries(injectionResults)
+        .filter(([key, result]) => 
+            result.tested && 
+            result.works && 
+            key.includes('message') || key.includes('load')
+        )
+        .sort((a, b) => {
+            const aCount = (a[1] as any).notificationCount || 0;
+            const bCount = (b[1] as any).notificationCount || 0;
+            return aCount - bCount;
+        });
+
+    return methods.length > 0 ? methods[0][0] : 'basicMessageCreate';
 }
 
 // Save persistent messages
@@ -346,80 +533,11 @@ function savePersistentMessages() {
         });
 
         storage.persistentMessages = JSON.parse(JSON.stringify(storage.persistentMessages));
-        storage.fakeDMChannels = JSON.parse(JSON.stringify(storage.fakeDMChannels));
-        log('Saved persistent messages and fake DM channels');
+        storage.testedParameters = injectionResults;
+        log('Saved persistent messages and test results');
     } catch (e) {
         logError('Failed to save persistent messages', e);
         storage.persistentMessages = {};
-        storage.fakeDMChannels = {};
-    }
-}
-
-// CRITICAL: Patch PrivateChannelStore to keep fake DMs in list
-function patchPrivateChannelStore() {
-    if (!PrivateChannelStore) {
-        logError('PrivateChannelStore not available for patching');
-        return;
-    }
-
-    try {
-        // Patch getPrivateChannelIds to include our fake channels
-        if (PrivateChannelStore.getPrivateChannelIds) {
-            const unpatch = after('getPrivateChannelIds', PrivateChannelStore, (_, result) => {
-                if (!result || !Array.isArray(result)) return result;
-
-                // Add our fake DM channels to the list
-                const fakeChannelIds = Object.keys(storage.fakeDMChannels);
-                const combined = [...new Set([...result, ...fakeChannelIds])];
-                
-                log(`Injected ${fakeChannelIds.length} fake DM channels into list`);
-                return combined;
-            });
-            
-            unpatches.push(unpatch);
-            log('Patched PrivateChannelStore.getPrivateChannelIds');
-        }
-    } catch (e) {
-        logError('Failed to patch PrivateChannelStore', e);
-    }
-}
-
-// CRITICAL: Patch ChannelStore to return fake channel data
-function patchChannelStore() {
-    if (!ChannelStore) {
-        logError('ChannelStore not available for patching');
-        return;
-    }
-
-    try {
-        // Patch getChannel to return fake channel data
-        if (ChannelStore.getChannel) {
-            const unpatch = after('getChannel', ChannelStore, (args, result) => {
-                const channelId = args[0];
-                
-                // If this is one of our fake DM channels, return fake channel data
-                if (storage.fakeDMChannels[channelId]) {
-                    const fakeChannelData = storage.fakeDMChannels[channelId];
-                    const messages = storage.persistentMessages[channelId] || [];
-                    const lastMessage = messages[messages.length - 1];
-                    
-                    return result || {
-                        id: channelId,
-                        type: 1, // DM type
-                        recipients: [fakeChannelData.userId],
-                        last_message_id: lastMessage?.id || null,
-                        lastMessageId: lastMessage?.id || null
-                    };
-                }
-                
-                return result;
-            });
-            
-            unpatches.push(unpatch);
-            log('Patched ChannelStore.getChannel');
-        }
-    } catch (e) {
-        logError('Failed to patch ChannelStore', e);
     }
 }
 
@@ -473,31 +591,10 @@ export async function fakeMessage(options: {
                 storage.persistentMessages[channelId] = [];
             }
             
-            // CRITICAL FIX: Don't replace the array, just add to it
-            // Store messages with unique IDs to prevent duplicates
+            // ONLY ADD THIS CHECK - rest stays the same:
             const existingIds = new Set(storage.persistentMessages[channelId].map((m: any) => m.id));
             if (!existingIds.has(message.id)) {
                 storage.persistentMessages[channelId].push(message);
-                log(`Added message ${message.id} to channel ${channelId}`);
-            }
-            
-            // CRITICAL: Register this channel as a fake DM
-            if (!storage.fakeDMChannels[channelId]) {
-                storage.fakeDMChannels[channelId] = {
-                    userId: options.targetUserId || options.fromUserId,
-                    createdAt: Date.now(),
-                    senderIds: [] // Track all senders in this DM
-                };
-                log(`Registered fake DM channel: ${channelId}`);
-            }
-            
-            // Track all unique senders in this DM
-            if (!storage.fakeDMChannels[channelId].senderIds) {
-                storage.fakeDMChannels[channelId].senderIds = [];
-            }
-            if (!storage.fakeDMChannels[channelId].senderIds.includes(options.fromUserId)) {
-                storage.fakeDMChannels[channelId].senderIds.push(options.fromUserId);
-                log(`Added sender ${options.fromUserId} to channel ${channelId}`);
             }
             
             savePersistentMessages();
@@ -508,21 +605,6 @@ export async function fakeMessage(options: {
 
         if (success) {
             log('Fake message sent successfully');
-            
-            // Force update DM list
-            if (PrivateChannelStore) {
-                try {
-                    FluxDispatcher.dispatch({
-                        type: 'CHANNEL_UPDATES',
-                        channels: [{
-                            id: channelId,
-                            last_message_id: message.id
-                        }]
-                    });
-                } catch (e) {
-                    logError('Failed to update channel list', e);
-                }
-            }
         }
 
         return success;
@@ -677,9 +759,8 @@ function startChannelMonitoring() {
 // Clear all fake messages
 export function clearAllMessages() {
     storage.persistentMessages = {};
-    storage.fakeDMChannels = {};
     savePersistentMessages();
-    log('Cleared all persistent messages and fake DM channels');
+    log('Cleared all persistent messages');
     if (showToast) showToast('✅ All fake messages cleared', 'Check');
 }
 
@@ -687,7 +768,6 @@ export function clearAllMessages() {
 export function clearChannelMessages(channelId: string) {
     if (storage.persistentMessages[channelId]) {
         delete storage.persistentMessages[channelId];
-        delete storage.fakeDMChannels[channelId];
         savePersistentMessages();
         log(`Cleared messages for channel ${channelId}`);
         if (showToast) showToast('✅ Channel messages cleared', 'Check');
@@ -709,6 +789,49 @@ export async function quickTest(targetUserId: string, fromUserId: string) {
     });
 }
 
+// Run parameter tests
+export async function runParameterTests(targetUserId: string, fromUserId: string) {
+    log('Starting parameter tests...');
+    
+    const channelId = await ensureDMChannel(targetUserId);
+    if (!channelId) {
+        logError('Cannot run tests: No DM channel');
+        if (showToast) showToast('❌ Cannot run tests: No DM channel', 'Small');
+        return;
+    }
+
+    const testMessage = await createMessageObject({
+        channelId,
+        userId: fromUserId,
+        content: '🧪 Testing injection parameters...',
+        username: 'Test Bot'
+    });
+
+    // Test each injection method
+    for (const method of ['basicMessageCreate', 'messageCreateWithLocal', 'messageCreateWithSilent', 
+                          'messageCreateWithCached', 'loadMessagesSuccess', 'loadMessagesSuccessWithCached']) {
+        const testMsg = { ...testMessage, id: generateMessageId(), content: `🧪 Test: ${method}` };
+        const result = await testInjectionMethod(testMsg, method);
+        (injectionResults as any)[method].tested = true;
+        (injectionResults as any)[method].works = result;
+        await delay(1000);
+    }
+
+    // Test ACK methods
+    const lastMessageId = testMessage.id;
+    for (const method of ['channelAckBasic', 'channelAckWithManual', 'channelAckWithLocal', 'channelAckWithBoth']) {
+        const result = await testAckMethod(channelId, lastMessageId, method);
+        (injectionResults as any)[method].tested = true;
+        (injectionResults as any)[method].works = result;
+        await delay(500);
+    }
+
+    savePersistentMessages();
+    log('Parameter tests complete', injectionResults);
+    
+    if (showToast) showToast('✅ Tests complete! Check console for results', 'Check');
+}
+
 // Initialize modules
 async function initModules() {
     try {
@@ -719,7 +842,7 @@ async function initModules() {
         PrivateChannelStore = findStore(['PrivateChannelStore'], ['getPrivateChannelIds']);
         RelationshipStore = findStore(['RelationshipStore'], ['getRelationships']);
 
-        const ready = ChannelStore && UserStore && PrivateChannelStore;
+        const ready = ChannelStore && UserStore;
 
         if (ready) {
             log('All critical modules loaded');
@@ -740,7 +863,6 @@ function recoverStorage() {
         if (typeof storage.persistentMessages !== 'object' || storage.persistentMessages === null) {
             logger.warn('[MessageInjector] Corrupted storage detected, resetting...');
             storage.persistentMessages = {};
-            storage.fakeDMChannels = {};
             return;
         }
 
@@ -762,7 +884,6 @@ function recoverStorage() {
     } catch (e) {
         logError('Failed to recover storage', e);
         storage.persistentMessages = {};
-        storage.fakeDMChannels = {};
     }
 }
 
@@ -770,9 +891,15 @@ function recoverStorage() {
 export default {
     onLoad: async () => {
         try {
-            logger.log('[MessageInjector] Loading (DM List Interceptor Edition)...');
+            logger.log('[MessageInjector] Loading (Self-Testing Edition)...');
 
             recoverStorage();
+
+            // Load previous test results
+            if (storage.testedParameters) {
+                Object.assign(injectionResults, storage.testedParameters);
+                log('Loaded previous test results', injectionResults);
+            }
 
             await delay(1000);
 
@@ -782,10 +909,6 @@ export default {
                 if (showToast) showToast('❌ Plugin failed to load', 'Small');
                 return;
             }
-
-            // CRITICAL: Patch stores FIRST before anything else
-            patchPrivateChannelStore();
-            patchChannelStore();
 
             setupMessagePersistence();
             startChannelMonitoring();
@@ -810,6 +933,7 @@ export default {
                 clearChannelMessages,
                 getAllMessages,
                 quickTest,
+                runParameterTests,
                 reinjectChannel: (channelId: string) => reinjectMessagesForChannel(channelId),
                 reinjectAll: () => {
                     Object.keys(storage.persistentMessages).forEach(channelId => {
@@ -820,12 +944,16 @@ export default {
                     enabled: storage.enabled,
                     messageCount: Object.values(storage.persistentMessages).reduce((acc: number, msgs: any) => acc + msgs.length, 0),
                     channelCount: Object.keys(storage.persistentMessages).length,
-                    fakeDMCount: Object.keys(storage.fakeDMChannels).length
+                    testResults: injectionResults
                 }),
-                getFakeDMChannels: () => storage.fakeDMChannels
+                getTestResults: () => injectionResults,
+                testInjection: async (targetUserId: string, fromUserId: string) => {
+                    await runParameterTests(targetUserId, fromUserId);
+                }
             };
 
-            logger.log('[MessageInjector] ✅ Loaded successfully (DM List Interceptor Edition)');
+            logger.log('[MessageInjector] ✅ Loaded successfully (Self-Testing Edition)');
+            logger.log('[MessageInjector] Use __MESSAGE_FAKER__.testInjection(targetUserId, fromUserId) to test parameters');
 
         } catch (e) {
             logError('Fatal error during load', e);
