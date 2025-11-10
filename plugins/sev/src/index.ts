@@ -1,7 +1,7 @@
 /**
  * @name Message Injector
  * @description Inject fake messages in DMs
- * @version 3.0.0
+ * @version 3.1.0
  */
 import { FluxDispatcher } from "@vendetta/metro/common";
 import { findByProps, findByStoreName } from "@vendetta/metro";
@@ -18,6 +18,8 @@ storage.persistentMessages ??= {};
 storage.autoInjectOnStartup ??= true;
 storage.preventMessageDeletion ??= true;
 storage.testedParameters ??= {}; // Store what works
+storage.webhookUrl ??= ""; // Discord webhook URL
+storage.webhookEnabled ??= false;
 
 const unpatches: (() => void)[] = [];
 let ChannelStore: any = null;
@@ -42,6 +44,58 @@ const injectionResults = {
     channelAckWithLocal: { tested: false, works: false },
     channelAckWithBoth: { tested: false, works: false }
 };
+
+// Discord webhook logging
+async function sendWebhookLog(data: {
+    action: string;
+    details?: any;
+    success?: boolean;
+    error?: string;
+}) {
+    if (!storage.webhookEnabled || !storage.webhookUrl) return;
+
+    try {
+        const timestamp = new Date().toISOString();
+        const color = data.success === false ? 0xED4245 : data.success === true ? 0x3BA55D : 0x5865F2;
+        
+        const embed = {
+            title: `🔧 Message Injector - ${data.action}`,
+            color: color,
+            timestamp: timestamp,
+            fields: [] as any[]
+        };
+
+        if (data.details) {
+            for (const [key, value] of Object.entries(data.details)) {
+                embed.fields.push({
+                    name: key,
+                    value: typeof value === 'object' ? `\`\`\`json\n${JSON.stringify(value, null, 2).substring(0, 1000)}\`\`\`` : `\`${value}\``,
+                    inline: key.length < 15
+                });
+            }
+        }
+
+        if (data.error) {
+            embed.fields.push({
+                name: "❌ Error",
+                value: `\`\`\`${data.error.substring(0, 1000)}\`\`\``,
+                inline: false
+            });
+        }
+
+        await fetch(storage.webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username: "Message Injector Logger",
+                avatar_url: "https://cdn.discordapp.com/embed/avatars/0.png",
+                embeds: [embed]
+            })
+        });
+    } catch (e) {
+        logError('Failed to send webhook log', e);
+    }
+}
 
 // Logging helpers
 const log = (msg: string, data?: any) => {
@@ -320,6 +374,21 @@ async function createMessageObject(options: {
     };
 
     log('Created message object', message);
+    
+    await sendWebhookLog({
+        action: "Message Created",
+        details: {
+            "Message ID": message.id,
+            "Channel ID": options.channelId,
+            "From User ID": options.userId,
+            "Username": username,
+            "Content": options.content || "(empty)",
+            "Has Embed": validEmbed ? "Yes" : "No",
+            "Timestamp": timestamp
+        },
+        success: true
+    });
+    
     return message;
 }
 
@@ -394,9 +463,31 @@ async function testInjectionMethod(message: any, method: string): Promise<boolea
         }
 
         log(`Tested injection method: ${method}`);
+        
+        await sendWebhookLog({
+            action: `Test Injection - ${method}`,
+            details: {
+                "Method": method,
+                "Message ID": message.id,
+                "Channel ID": message.channel_id
+            },
+            success: true
+        });
+        
         return true;
     } catch (e) {
         logError(`Failed to test ${method}`, e);
+        
+        await sendWebhookLog({
+            action: `Test Injection Failed - ${method}`,
+            details: {
+                "Method": method,
+                "Message ID": message.id
+            },
+            success: false,
+            error: String(e)
+        });
+        
         return false;
     }
 }
@@ -448,9 +539,31 @@ async function testAckMethod(channelId: string, messageId: string, method: strin
         }
 
         log(`Tested ACK method: ${method}`);
+        
+        await sendWebhookLog({
+            action: `Test ACK - ${method}`,
+            details: {
+                "Method": method,
+                "Channel ID": channelId,
+                "Message ID": messageId
+            },
+            success: true
+        });
+        
         return true;
     } catch (e) {
         logError(`Failed to test ${method}`, e);
+        
+        await sendWebhookLog({
+            action: `Test ACK Failed - ${method}`,
+            details: {
+                "Method": method,
+                "Channel ID": channelId
+            },
+            success: false,
+            error: String(e)
+        });
+        
         return false;
     }
 }
@@ -463,7 +576,6 @@ function injectMessage(message: any): boolean {
     }
 
     try {
-        // Use proven method if we've tested it
         const bestMethod = getBestInjectionMethod();
         
         if (bestMethod === 'loadMessagesSuccess') {
@@ -484,7 +596,6 @@ function injectMessage(message: any): boolean {
                 cached: true
             });
         } else {
-            // Default to basic MESSAGE_CREATE (proven to work)
             FluxDispatcher.dispatch({
                 type: 'MESSAGE_CREATE',
                 channelId: message.channel_id,
@@ -494,16 +605,39 @@ function injectMessage(message: any): boolean {
         }
 
         log('Message injected successfully', message.id);
+        
+        sendWebhookLog({
+            action: "Message Injected",
+            details: {
+                "Method": bestMethod,
+                "Message ID": message.id,
+                "Channel ID": message.channel_id,
+                "Author ID": message.author.id,
+                "Content Preview": message.content.substring(0, 100)
+            },
+            success: true
+        });
+        
         return true;
     } catch (e) {
         logError('Failed to inject message', e);
+        
+        sendWebhookLog({
+            action: "Message Injection Failed",
+            details: {
+                "Message ID": message.id,
+                "Channel ID": message.channel_id
+            },
+            success: false,
+            error: String(e)
+        });
+        
         return false;
     }
 }
 
 // Get the best injection method based on testing
 function getBestInjectionMethod(): string {
-    // Prefer methods with lower notification count
     const methods = Object.entries(injectionResults)
         .filter(([key, result]) => 
             result.tested && 
@@ -557,6 +691,16 @@ export async function fakeMessage(options: {
         if (!validateUserId(options.fromUserId)) {
             logError('Invalid sender user ID');
             if (showToast) showToast('❌ Invalid sender user ID', 'Small');
+            
+            await sendWebhookLog({
+                action: "Fake Message Failed",
+                details: {
+                    "Reason": "Invalid sender user ID",
+                    "From User ID": options.fromUserId
+                },
+                success: false
+            });
+            
             return false;
         }
 
@@ -565,6 +709,16 @@ export async function fakeMessage(options: {
             if (!validateUserId(options.targetUserId)) {
                 logError('Invalid target user ID');
                 if (showToast) showToast('❌ Invalid target user ID', 'Small');
+                
+                await sendWebhookLog({
+                    action: "Fake Message Failed",
+                    details: {
+                        "Reason": "Invalid target user ID",
+                        "Target User ID": options.targetUserId
+                    },
+                    success: false
+                });
+                
                 return false;
             }
             
@@ -574,6 +728,16 @@ export async function fakeMessage(options: {
         if (!channelId) {
             logError('No valid channel ID found');
             if (showToast) showToast('❌ Could not find DM channel', 'Small');
+            
+            await sendWebhookLog({
+                action: "Fake Message Failed",
+                details: {
+                    "Reason": "No valid channel ID found",
+                    "Target User ID": options.targetUserId || "N/A"
+                },
+                success: false
+            });
+            
             return false;
         }
 
@@ -591,7 +755,6 @@ export async function fakeMessage(options: {
                 storage.persistentMessages[channelId] = [];
             }
             
-            // ONLY ADD THIS CHECK - rest stays the same:
             const existingIds = new Set(storage.persistentMessages[channelId].map((m: any) => m.id));
             if (!existingIds.has(message.id)) {
                 storage.persistentMessages[channelId].push(message);
@@ -599,6 +762,16 @@ export async function fakeMessage(options: {
             
             savePersistentMessages();
             log('Message saved to persistent storage', message.id);
+            
+            await sendWebhookLog({
+                action: "Message Saved to Storage",
+                details: {
+                    "Message ID": message.id,
+                    "Channel ID": channelId,
+                    "Persistent": "Yes"
+                },
+                success: true
+            });
         }
 
         const success = injectMessage(message);
@@ -611,6 +784,13 @@ export async function fakeMessage(options: {
     } catch (e) {
         logError('Failed to send fake message', e);
         if (showToast) showToast('❌ Failed to send message', 'Small');
+        
+        await sendWebhookLog({
+            action: "Fake Message Failed",
+            success: false,
+            error: String(e)
+        });
+        
         return false;
     }
 }
@@ -628,6 +808,15 @@ function reinjectMessagesForChannel(channelId: string) {
     }
 
     log(`Reinjecting ${messages.length} messages for channel ${channelId}`);
+    
+    sendWebhookLog({
+        action: "Messages Reinjected",
+        details: {
+            "Channel ID": channelId,
+            "Message Count": messages.length
+        },
+        success: true
+    });
 
     messages.forEach((message: any, index: number) => {
         setTimeout(() => {
@@ -663,6 +852,15 @@ function setupMessagePersistence() {
                         log('Prevented deletion of fake message', messageId);
                         args[0] = { type: 'NOOP' };
                         setTimeout(() => injectMessage(fakeMessage), 100);
+                        
+                        sendWebhookLog({
+                            action: "Message Deletion Prevented",
+                            details: {
+                                "Message ID": messageId,
+                                "Channel ID": channelId
+                            },
+                            success: true
+                        });
                     }
                 }
             }
@@ -677,6 +875,15 @@ function setupMessagePersistence() {
                     if (hasFake) {
                         args[0] = { type: 'NOOP' };
                         setTimeout(() => reinjectMessagesForChannel(channelId), 200);
+                        
+                        sendWebhookLog({
+                            action: "Bulk Deletion Prevented",
+                            details: {
+                                "Channel ID": channelId,
+                                "Message IDs": ids.join(", ")
+                            },
+                            success: true
+                        });
                     }
                 }
             }
@@ -745,6 +952,14 @@ function startChannelMonitoring() {
                 currentChannelId = selectedChannel;
 
                 log(`Channel switched from ${previousChannel} to ${selectedChannel}`);
+                
+                sendWebhookLog({
+                    action: "Channel Switched",
+                    details: {
+                        "Previous Channel": previousChannel || "None",
+                        "New Channel": selectedChannel
+                    }
+                });
 
                 if (storage.persistentMessages[selectedChannel]) {
                     setTimeout(() => {
@@ -758,18 +973,42 @@ function startChannelMonitoring() {
 
 // Clear all fake messages
 export function clearAllMessages() {
+    const count = Object.values(storage.persistentMessages).reduce(
+        (acc: number, msgs: any) => acc + msgs.length, 0
+    );
+    
     storage.persistentMessages = {};
     savePersistentMessages();
     log('Cleared all persistent messages');
+    
+    sendWebhookLog({
+        action: "All Messages Cleared",
+        details: {
+            "Messages Cleared": count
+        },
+        success: true
+    });
+    
     if (showToast) showToast('✅ All fake messages cleared', 'Check');
 }
 
 // Clear messages for specific channel
 export function clearChannelMessages(channelId: string) {
     if (storage.persistentMessages[channelId]) {
+        const count = storage.persistentMessages[channelId].length;
         delete storage.persistentMessages[channelId];
         savePersistentMessages();
         log(`Cleared messages for channel ${channelId}`);
+        
+        sendWebhookLog({
+            action: "Channel Messages Cleared",
+            details: {
+                "Channel ID": channelId,
+                "Messages Cleared": count
+            },
+            success: true
+        });
+        
         if (showToast) showToast('✅ Channel messages cleared', 'Check');
     }
 }
@@ -781,6 +1020,14 @@ export function getAllMessages() {
 
 // Quick test function
 export async function quickTest(targetUserId: string, fromUserId: string) {
+    await sendWebhookLog({
+        action: "Quick Test Started",
+        details: {
+            "Target User ID": targetUserId,
+            "From User ID": fromUserId
+        }
+    });
+    
     return await fakeMessage({
         targetUserId,
         fromUserId,
@@ -793,10 +1040,25 @@ export async function quickTest(targetUserId: string, fromUserId: string) {
 export async function runParameterTests(targetUserId: string, fromUserId: string) {
     log('Starting parameter tests...');
     
+    await sendWebhookLog({
+        action: "Parameter Tests Started",
+        details: {
+            "Target User ID": targetUserId,
+            "From User ID": fromUserId
+        }
+    });
+    
     const channelId = await ensureDMChannel(targetUserId);
     if (!channelId) {
         logError('Cannot run tests: No DM channel');
         if (showToast) showToast('❌ Cannot run tests: No DM channel', 'Small');
+        
+        await sendWebhookLog({
+            action: "Parameter Tests Failed",
+            success: false,
+            error: "No DM channel found"
+        });
+        
         return;
     }
 
@@ -829,6 +1091,14 @@ export async function runParameterTests(targetUserId: string, fromUserId: string
     savePersistentMessages();
     log('Parameter tests complete', injectionResults);
     
+    await sendWebhookLog({
+        action: "Parameter Tests Complete",
+        details: {
+            "Test Results": injectionResults
+        },
+        success: true
+    });
+    
     if (showToast) showToast('✅ Tests complete! Check console for results', 'Check');
 }
 
@@ -846,13 +1116,38 @@ async function initModules() {
 
         if (ready) {
             log('All critical modules loaded');
+            
+            await sendWebhookLog({
+                action: "Modules Initialized",
+                details: {
+                    "ChannelStore": ChannelStore ? "✅" : "❌",
+                    "UserStore": UserStore ? "✅" : "❌",
+                    "MessageStore": MessageStore ? "✅" : "❌",
+                    "SelectedChannelStore": SelectedChannelStore ? "✅" : "❌",
+                    "PrivateChannelStore": PrivateChannelStore ? "✅" : "❌"
+                },
+                success: true
+            });
         } else {
             logError('Some modules failed to load');
+            
+            await sendWebhookLog({
+                action: "Module Initialization Failed",
+                success: false,
+                error: "Critical modules missing"
+            });
         }
 
         return ready;
     } catch (e) {
         logError('Failed to initialize modules', e);
+        
+        await sendWebhookLog({
+            action: "Module Initialization Error",
+            success: false,
+            error: String(e)
+        });
+        
         return false;
     }
 }
@@ -891,11 +1186,10 @@ function recoverStorage() {
 export default {
     onLoad: async () => {
         try {
-            logger.log('[MessageInjector] Loading (Self-Testing Edition)...');
+            logger.log('[MessageInjector] Loading (Self-Testing Edition with Webhook Logging)...');
 
             recoverStorage();
 
-            // Load previous test results
             if (storage.testedParameters) {
                 Object.assign(injectionResults, storage.testedParameters);
                 log('Loaded previous test results', injectionResults);
@@ -907,6 +1201,13 @@ export default {
             if (!modulesReady) {
                 logError('Failed to load critical modules');
                 if (showToast) showToast('❌ Plugin failed to load', 'Small');
+                
+                await sendWebhookLog({
+                    action: "Plugin Load Failed",
+                    success: false,
+                    error: "Critical modules not ready"
+                });
+                
                 return;
             }
 
@@ -918,6 +1219,14 @@ export default {
                 const channelCount = Object.keys(storage.persistentMessages).length;
                 if (channelCount > 0) {
                     log(`Auto-injecting messages for ${channelCount} channels on startup`);
+                    
+                    await sendWebhookLog({
+                        action: "Auto-Inject on Startup",
+                        details: {
+                            "Channel Count": channelCount
+                        }
+                    });
+                    
                     Object.keys(storage.persistentMessages).forEach(channelId => {
                         setTimeout(() => {
                             reinjectMessagesForChannel(channelId);
@@ -944,7 +1253,8 @@ export default {
                     enabled: storage.enabled,
                     messageCount: Object.values(storage.persistentMessages).reduce((acc: number, msgs: any) => acc + msgs.length, 0),
                     channelCount: Object.keys(storage.persistentMessages).length,
-                    testResults: injectionResults
+                    testResults: injectionResults,
+                    webhookEnabled: storage.webhookEnabled
                 }),
                 getTestResults: () => injectionResults,
                 testInjection: async (targetUserId: string, fromUserId: string) => {
@@ -952,12 +1262,27 @@ export default {
                 }
             };
 
-            logger.log('[MessageInjector] ✅ Loaded successfully (Self-Testing Edition)');
+            await sendWebhookLog({
+                action: "Plugin Loaded Successfully",
+                details: {
+                    "Version": "3.1.0",
+                    "Webhook Enabled": storage.webhookEnabled ? "Yes" : "No"
+                },
+                success: true
+            });
+
+            logger.log('[MessageInjector] ✅ Loaded successfully (Self-Testing Edition with Webhook Logging)');
             logger.log('[MessageInjector] Use __MESSAGE_FAKER__.testInjection(targetUserId, fromUserId) to test parameters');
 
         } catch (e) {
             logError('Fatal error during load', e);
             if (showToast) showToast('❌ Plugin failed to load', 'Small');
+            
+            await sendWebhookLog({
+                action: "Plugin Load Error",
+                success: false,
+                error: String(e)
+            });
         }
     },
 
@@ -979,6 +1304,11 @@ export default {
             if ((window as any).__MESSAGE_FAKER__) {
                 delete (window as any).__MESSAGE_FAKER__;
             }
+
+            sendWebhookLog({
+                action: "Plugin Unloaded",
+                success: true
+            });
 
             logger.log('[MessageInjector] Unloaded');
             if (showToast) showToast('Plugin unloaded', 'Check');
