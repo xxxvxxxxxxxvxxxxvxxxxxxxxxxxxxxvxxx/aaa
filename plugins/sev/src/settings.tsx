@@ -134,6 +134,50 @@ export default () => {
         }
     };
 
+    const testWebhook = async () => {
+        if (!storage.webhookUrl || !storage.webhookUrl.trim()) {
+            showToast("❌ Enter webhook URL first", "Small");
+            return;
+        }
+
+        try {
+            const response = await fetch(storage.webhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    username: "Message Injector Logger",
+                    avatar_url: "https://cdn.discordapp.com/embed/avatars/0.png",
+                    embeds: [{
+                        title: "🧪 Webhook Test",
+                        description: "If you're seeing this, your webhook is working correctly!",
+                        color: 0x3BA55D,
+                        timestamp: new Date().toISOString(),
+                        fields: [
+                            {
+                                name: "Status",
+                                value: "✅ Connected",
+                                inline: true
+                            },
+                            {
+                                name: "Test Time",
+                                value: new Date().toLocaleString(),
+                                inline: true
+                            }
+                        ]
+                    }]
+                })
+            });
+
+            if (response.ok) {
+                showToast("✅ Webhook test successful!", "Check");
+            } else {
+                showToast("❌ Webhook test failed", "Small");
+            }
+        } catch (e) {
+            showToast("❌ Failed to send test webhook", "Small");
+        }
+    };
+
     const pasteTargetId = async () => {
         try {
             const text = await clipboard.getString();
@@ -152,6 +196,18 @@ export default () => {
             if (text) {
                 setFromUserId(text.trim());
                 showToast("📋 Pasted sender user ID", "clipboard");
+            }
+        } catch (e) {
+            showToast("Failed to paste", "Small");
+        }
+    };
+
+    const pasteWebhookUrl = async () => {
+        try {
+            const text = await clipboard.getString();
+            if (text) {
+                storage.webhookUrl = text.trim();
+                showToast("📋 Pasted webhook URL", "clipboard");
             }
         } catch (e) {
             showToast("Failed to paste", "Small");
@@ -209,6 +265,52 @@ export default () => {
                         storage.debug = v;
                     }}
                 />
+            </FormSection>
+
+            <FormDivider />
+
+            <FormSection title="🪝 WEBHOOK LOGGING">
+                <FormText style={styles.infoText}>
+                    📊 Send detailed logs to a Discord webhook for monitoring all plugin actions
+                </FormText>
+                
+                <FormSwitch
+                    label="Enable Webhook Logging"
+                    subLabel="Send logs to Discord webhook"
+                    value={storage.webhookEnabled}
+                    onValueChange={(v: boolean) => {
+                        storage.webhookEnabled = v;
+                        showToast(v ? "✅ Webhook enabled" : "❌ Webhook disabled", "Check");
+                    }}
+                />
+
+                <FormInput
+                    title="WEBHOOK URL"
+                    placeholder="https://discord.com/api/webhooks/..."
+                    value={storage.webhookUrl}
+                    onChange={(v: string) => {
+                        storage.webhookUrl = v;
+                    }}
+                />
+
+                <TouchableOpacity style={styles.button} onPress={pasteWebhookUrl}>
+                    <Text style={styles.buttonText}>📋 Paste Webhook URL</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                    style={[styles.button, styles.successButton]}
+                    onPress={testWebhook}
+                >
+                    <Text style={styles.buttonText}>🧪 Test Webhook</Text>
+                </TouchableOpacity>
+
+                <FormText style={styles.infoText}>
+                    ℹ️ Webhook will log: message creation, injection, deletion prevention, channel switches, and more
+                </FormText>
+
+                <FormText style={styles.warningText}>
+                    ⚠️ All actions including user IDs, message IDs, and content will be logged
+                </FormText>
             </FormSection>
 
             <FormDivider />
@@ -329,6 +431,9 @@ __MESSAGE_FAKER__.fakeMessage({
                 <FormText style={styles.infoText}>
                     📊 Current fake messages: {messageCount} messages in {channelCount} channels
                 </FormText>
+                <FormText style={styles.infoText}>
+                    🪝 Webhook logging: {storage.webhookEnabled ? "✅ Enabled" : "❌ Disabled"}
+                </FormText>
             </FormSection>
 
             <FormDivider />
@@ -358,7 +463,7 @@ __MESSAGE_FAKER__.fakeMessage({
             </FormSection>
 
             <FormText style={[styles.infoText, { marginTop: 16, marginBottom: 32, textAlign: "center" as const }]}>
-                MessageFaker v1.0.1 for Kettu/Bunny/Vendetta
+                MessageFaker v3.1.0 for Kettu/Bunny/Vendetta (with Webhook Logging)
             </FormText>
         </ScrollView>
     );
