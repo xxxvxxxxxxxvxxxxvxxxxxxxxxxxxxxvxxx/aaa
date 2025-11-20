@@ -64,9 +64,20 @@ export default () => {
     const [targetUserId, setTargetUserId] = React.useState("");
     const [fromUserId, setFromUserId] = React.useState("");
     const [messageContent, setMessageContent] = React.useState("");
+    const [messageTimestamp, setMessageTimestamp] = React.useState("");
     const [embedTitle, setEmbedTitle] = React.useState("");
     const [embedDescription, setEmbedDescription] = React.useState("");
+    const [embedUrl, setEmbedUrl] = React.useState("");
+    const [embedColor, setEmbedColor] = React.useState("");
     const [embedImage, setEmbedImage] = React.useState("");
+    const [embedThumbnail, setEmbedThumbnail] = React.useState("");
+    const [embedAuthorName, setEmbedAuthorName] = React.useState("");
+    const [embedAuthorUrl, setEmbedAuthorUrl] = React.useState("");
+    const [embedAuthorIcon, setEmbedAuthorIcon] = React.useState("");
+    const [embedFooterText, setEmbedFooterText] = React.useState("");
+    const [embedFooterIcon, setEmbedFooterIcon] = React.useState("");
+    const [embedTimestamp, setEmbedTimestamp] = React.useState("");
+    const [embedFields, setEmbedFields] = React.useState("");
 
     const handleSendFakeMessage = async () => {
         const api = getAPI();
@@ -90,13 +101,58 @@ export default () => {
             return;
         }
 
-        const embed = (embedTitle || embedDescription || embedImage) ? {
-            title: embedTitle || undefined,
-            description: embedDescription || undefined,
-            image: embedImage ? { url: embedImage } : undefined,
-            thumbnail: embedImage ? { url: embedImage } : undefined,
-            type: 'rich'
-        } : undefined;
+        // Build embed object with all fields
+        let embed = undefined;
+        if (embedTitle || embedDescription || embedImage || embedThumbnail || 
+            embedAuthorName || embedFooterText || embedUrl || embedColor || 
+            embedTimestamp || embedFields) {
+            
+            embed = {};
+            
+            if (embedTitle) embed.title = embedTitle;
+            if (embedDescription) embed.description = embedDescription;
+            if (embedUrl) embed.url = embedUrl;
+            
+            // Parse color (hex or decimal)
+            if (embedColor) {
+                const colorStr = embedColor.trim();
+                if (colorStr.startsWith('#')) {
+                    embed.color = parseInt(colorStr.substring(1), 16);
+                } else if (colorStr.startsWith('0x')) {
+                    embed.color = parseInt(colorStr, 16);
+                } else if (!isNaN(Number(colorStr))) {
+                    embed.color = Number(colorStr);
+                }
+            }
+            
+            if (embedImage) embed.image = { url: embedImage };
+            if (embedThumbnail) embed.thumbnail = { url: embedThumbnail };
+            
+            if (embedAuthorName) {
+                embed.author = { name: embedAuthorName };
+                if (embedAuthorUrl) embed.author.url = embedAuthorUrl;
+                if (embedAuthorIcon) embed.author.icon_url = embedAuthorIcon;
+            }
+            
+            if (embedFooterText) {
+                embed.footer = { text: embedFooterText };
+                if (embedFooterIcon) embed.footer.icon_url = embedFooterIcon;
+            }
+            
+            if (embedTimestamp) embed.timestamp = embedTimestamp;
+            
+            // Parse fields (JSON array format)
+            if (embedFields) {
+                try {
+                    const parsedFields = JSON.parse(embedFields);
+                    if (Array.isArray(parsedFields)) {
+                        embed.fields = parsedFields;
+                    }
+                } catch (e) {
+                    showToast("⚠️ Invalid fields JSON format", "Small");
+                }
+            }
+        }
 
         try {
             const success = await api.fakeMessage({
@@ -104,6 +160,7 @@ export default () => {
                 fromUserId: fromUserId.trim(),
                 content: messageContent.trim(),
                 embed: embed,
+                timestamp: messageTimestamp.trim() || undefined,
                 persistent: true
             });
 
@@ -134,50 +191,6 @@ export default () => {
         }
     };
 
-    const testWebhook = async () => {
-        if (!storage.webhookUrl || !storage.webhookUrl.trim()) {
-            showToast("❌ Enter webhook URL first", "Small");
-            return;
-        }
-
-        try {
-            const response = await fetch(storage.webhookUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    username: "Message Injector Logger",
-                    avatar_url: "https://cdn.discordapp.com/embed/avatars/0.png",
-                    embeds: [{
-                        title: "🧪 Webhook Test",
-                        description: "If you're seeing this, your webhook is working correctly!",
-                        color: 0x3BA55D,
-                        timestamp: new Date().toISOString(),
-                        fields: [
-                            {
-                                name: "Status",
-                                value: "✅ Connected",
-                                inline: true
-                            },
-                            {
-                                name: "Test Time",
-                                value: new Date().toLocaleString(),
-                                inline: true
-                            }
-                        ]
-                    }]
-                })
-            });
-
-            if (response.ok) {
-                showToast("✅ Webhook test successful!", "Check");
-            } else {
-                showToast("❌ Webhook test failed", "Small");
-            }
-        } catch (e) {
-            showToast("❌ Failed to send test webhook", "Small");
-        }
-    };
-
     const pasteTargetId = async () => {
         try {
             const text = await clipboard.getString();
@@ -202,16 +215,14 @@ export default () => {
         }
     };
 
-    const pasteWebhookUrl = async () => {
-        try {
-            const text = await clipboard.getString();
-            if (text) {
-                storage.webhookUrl = text.trim();
-                showToast("📋 Pasted webhook URL", "clipboard");
-            }
-        } catch (e) {
-            showToast("Failed to paste", "Small");
-        }
+    const setCurrentTime = () => {
+        setMessageTimestamp(new Date().toISOString());
+        showToast("⏰ Set to current time", "Check");
+    };
+
+    const setEmbedCurrentTime = () => {
+        setEmbedTimestamp(new Date().toISOString());
+        showToast("⏰ Set embed to current time", "Check");
     };
 
     const messageCount = React.useMemo(() => {
@@ -225,9 +236,9 @@ export default () => {
 
     return (
         <ScrollView>
-            <FormSection title="MESSAGE FAKER">
+            <FormSection title="MESSAGE FAKER v3.1.0">
                 <FormText style={styles.infoText}>
-                    💬 Inject fake messages into DMs from anyone.
+                    💬 Inject fake messages into DMs with timestamp control & full embed support
                 </FormText>
                 <FormSwitch
                     label="Enable Plugin"
@@ -269,52 +280,6 @@ export default () => {
 
             <FormDivider />
 
-            <FormSection title="🪝 WEBHOOK LOGGING">
-                <FormText style={styles.infoText}>
-                    📊 Send detailed logs to a Discord webhook for monitoring all plugin actions
-                </FormText>
-                
-                <FormSwitch
-                    label="Enable Webhook Logging"
-                    subLabel="Send logs to Discord webhook"
-                    value={storage.webhookEnabled}
-                    onValueChange={(v: boolean) => {
-                        storage.webhookEnabled = v;
-                        showToast(v ? "✅ Webhook enabled" : "❌ Webhook disabled", "Check");
-                    }}
-                />
-
-                <FormInput
-                    title="WEBHOOK URL"
-                    placeholder="https://discord.com/api/webhooks/..."
-                    value={storage.webhookUrl}
-                    onChange={(v: string) => {
-                        storage.webhookUrl = v;
-                    }}
-                />
-
-                <TouchableOpacity style={styles.button} onPress={pasteWebhookUrl}>
-                    <Text style={styles.buttonText}>📋 Paste Webhook URL</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={[styles.button, styles.successButton]}
-                    onPress={testWebhook}
-                >
-                    <Text style={styles.buttonText}>🧪 Test Webhook</Text>
-                </TouchableOpacity>
-
-                <FormText style={styles.infoText}>
-                    ℹ️ Webhook will log: message creation, injection, deletion prevention, channel switches, and more
-                </FormText>
-
-                <FormText style={styles.warningText}>
-                    ⚠️ All actions including user IDs, message IDs, and content will be logged
-                </FormText>
-            </FormSection>
-
-            <FormDivider />
-
             <FormSection title="CREATE FAKE MESSAGE">
                 <FormText style={styles.infoText}>
                     📝 Create a fake message in someone's DM
@@ -349,30 +314,139 @@ export default () => {
                     onChange={setMessageContent}
                 />
 
+                <FormInput
+                    title="MESSAGE TIMESTAMP (Optional)"
+                    placeholder="ISO 8601 format: 2024-01-15T12:30:00Z"
+                    value={messageTimestamp}
+                    onChange={setMessageTimestamp}
+                />
+
+                <TouchableOpacity style={styles.button} onPress={setCurrentTime}>
+                    <Text style={styles.buttonText}>⏰ Set Current Time</Text>
+                </TouchableOpacity>
+
+                <FormText style={styles.warningText}>
+                    💡 Leave timestamp empty to use current time
+                </FormText>
+            </FormSection>
+
+            <FormDivider />
+
+            <FormSection title="EMBED (Optional)">
                 <FormText style={styles.infoText}>
-                    📎 Optional: Add an embed
+                    📎 Add a rich embed to your message
                 </FormText>
 
                 <FormInput
                     title="EMBED TITLE"
-                    placeholder="Optional embed title"
+                    placeholder="Title (max 256 characters)"
                     value={embedTitle}
                     onChange={setEmbedTitle}
                 />
 
                 <FormInput
                     title="EMBED DESCRIPTION"
-                    placeholder="Optional embed description"
+                    placeholder="Description (max 4096 characters)"
                     value={embedDescription}
                     onChange={setEmbedDescription}
                 />
 
                 <FormInput
-                    title="EMBED IMAGE URL"
-                    placeholder="Optional image URL"
+                    title="EMBED URL"
+                    placeholder="URL when title is clicked"
+                    value={embedUrl}
+                    onChange={setEmbedUrl}
+                />
+
+                <FormInput
+                    title="EMBED COLOR"
+                    placeholder="Hex (#5865F2) or Decimal (5793266)"
+                    value={embedColor}
+                    onChange={setEmbedColor}
+                />
+
+                <FormInput
+                    title="IMAGE URL"
+                    placeholder="Large image at bottom"
                     value={embedImage}
                     onChange={setEmbedImage}
                 />
+
+                <FormInput
+                    title="THUMBNAIL URL"
+                    placeholder="Small image at top-right"
+                    value={embedThumbnail}
+                    onChange={setEmbedThumbnail}
+                />
+
+                <FormText style={styles.infoText}>
+                    👤 Embed Author Section
+                </FormText>
+
+                <FormInput
+                    title="AUTHOR NAME"
+                    placeholder="Name (max 256 characters)"
+                    value={embedAuthorName}
+                    onChange={setEmbedAuthorName}
+                />
+
+                <FormInput
+                    title="AUTHOR URL"
+                    placeholder="URL when author name is clicked"
+                    value={embedAuthorUrl}
+                    onChange={setEmbedAuthorUrl}
+                />
+
+                <FormInput
+                    title="AUTHOR ICON URL"
+                    placeholder="Small icon next to author name"
+                    value={embedAuthorIcon}
+                    onChange={setEmbedAuthorIcon}
+                />
+
+                <FormText style={styles.infoText}>
+                    🦶 Embed Footer Section
+                </FormText>
+
+                <FormInput
+                    title="FOOTER TEXT"
+                    placeholder="Footer text (max 2048 characters)"
+                    value={embedFooterText}
+                    onChange={setEmbedFooterText}
+                />
+
+                <FormInput
+                    title="FOOTER ICON URL"
+                    placeholder="Small icon next to footer text"
+                    value={embedFooterIcon}
+                    onChange={setEmbedFooterIcon}
+                />
+
+                <FormInput
+                    title="EMBED TIMESTAMP"
+                    placeholder="ISO 8601: 2024-01-15T12:30:00Z"
+                    value={embedTimestamp}
+                    onChange={setEmbedTimestamp}
+                />
+
+                <TouchableOpacity style={styles.button} onPress={setEmbedCurrentTime}>
+                    <Text style={styles.buttonText}>⏰ Set Current Time</Text>
+                </TouchableOpacity>
+
+                <FormText style={styles.infoText}>
+                    📊 Embed Fields (Advanced)
+                </FormText>
+
+                <FormInput
+                    title="FIELDS (JSON Array)"
+                    placeholder='[{"name":"Field 1","value":"Value 1","inline":true}]'
+                    value={embedFields}
+                    onChange={setEmbedFields}
+                />
+
+                <FormText style={styles.warningText}>
+                    💡 Max 25 fields. Field name: max 256 chars, value: max 1024 chars
+                </FormText>
 
                 <TouchableOpacity
                     style={[styles.button, styles.successButton]}
@@ -391,38 +465,85 @@ export default () => {
 
             <FormDivider />
 
-            <FormSection title="CONSOLE API">
+            <FormSection title="CONSOLE API EXAMPLES">
                 <FormText style={styles.infoText}>
-                    🔧 You can also use the console for advanced usage:
+                    🔧 Advanced usage via console:
                 </FormText>
 
                 <Text style={styles.codeText}>
-                    {`// Send fake message
+                    {`// Basic message with timestamp
 __MESSAGE_FAKER__.fakeMessage({
   targetUserId: "USER_ID",
   fromUserId: "USER_ID",
   content: "Hello!",
+  timestamp: "2024-01-15T12:30:00Z",
   persistent: true
 });`}
                 </Text>
 
                 <Text style={styles.codeText}>
-                    {`// With embed
+                    {`// Full embed example
 __MESSAGE_FAKER__.fakeMessage({
   targetUserId: "USER_ID",
   fromUserId: "USER_ID",
-  content: "Check this out!",
+  content: "Check this embed!",
   embed: {
-    title: "Cool Title",
-    description: "Description",
-    image: { url: "https://..." }
+    title: "Amazing Embed",
+    description: "Full description",
+    url: "https://example.com",
+    color: 0x5865F2,
+    timestamp: "2024-01-15T12:30:00Z",
+    author: {
+      name: "Author Name",
+      url: "https://example.com",
+      icon_url: "https://i.imgur.com/..."
+    },
+    thumbnail: {
+      url: "https://i.imgur.com/..."
+    },
+    image: {
+      url: "https://i.imgur.com/..."
+    },
+    footer: {
+      text: "Footer Text",
+      icon_url: "https://i.imgur.com/..."
+    },
+    fields: [
+      {
+        name: "Field 1",
+        value: "Value 1",
+        inline: true
+      },
+      {
+        name: "Field 2",
+        value: "Value 2",
+        inline: true
+      }
+    ]
   }
 });`}
                 </Text>
 
                 <FormText style={styles.infoText}>
-                    Open Kettu debug console to use these commands
+                    Open debug console to use these commands
                 </FormText>
+            </FormSection>
+
+            <FormDivider />
+
+            <FormSection title="EMBED COLOR REFERENCE">
+                <FormText style={styles.infoText}>
+                    🎨 Common Discord colors:
+                </FormText>
+                <Text style={styles.codeText}>
+                    {`Blurple: #5865F2 (5793266)
+Green: #57F287 (5763719)
+Yellow: #FEE75C (16705372)
+Fuchsia: #EB459E (15418782)
+Red: #ED4245 (15548997)
+White: #FFFFFF (16777215)
+Black: #000000 (0)`}
+                </Text>
             </FormSection>
 
             <FormDivider />
@@ -430,9 +551,6 @@ __MESSAGE_FAKER__.fakeMessage({
             <FormSection title="STATISTICS">
                 <FormText style={styles.infoText}>
                     📊 Current fake messages: {messageCount} messages in {channelCount} channels
-                </FormText>
-                <FormText style={styles.infoText}>
-                    🪝 Webhook logging: {storage.webhookEnabled ? "✅ Enabled" : "❌ Disabled"}
                 </FormText>
             </FormSection>
 
@@ -449,9 +567,20 @@ __MESSAGE_FAKER__.fakeMessage({
                         setTargetUserId("");
                         setFromUserId("");
                         setMessageContent("");
+                        setMessageTimestamp("");
                         setEmbedTitle("");
                         setEmbedDescription("");
+                        setEmbedUrl("");
+                        setEmbedColor("");
                         setEmbedImage("");
+                        setEmbedThumbnail("");
+                        setEmbedAuthorName("");
+                        setEmbedAuthorUrl("");
+                        setEmbedAuthorIcon("");
+                        setEmbedFooterText("");
+                        setEmbedFooterIcon("");
+                        setEmbedTimestamp("");
+                        setEmbedFields("");
                     }}
                 >
                     <Text style={styles.buttonText}>🗑️ Clear ALL Fake Messages</Text>
@@ -463,7 +592,8 @@ __MESSAGE_FAKER__.fakeMessage({
             </FormSection>
 
             <FormText style={[styles.infoText, { marginTop: 16, marginBottom: 32, textAlign: "center" as const }]}>
-                MessageFaker v3.1.0 for Kettu/Bunny/Vendetta (with Webhook Logging)
+                MessageFaker v3.1.0 - Enhanced Edition
+                {'\n'}Timestamp Control • Full Embed Support
             </FormText>
         </ScrollView>
     );
