@@ -1,7 +1,7 @@
 /**
  * @name Message Injector
- * @description Inject fake messages in DMs
- * @version 3.1.0
+ * @description Inject fake messages in DMs with auto-embed from URLs
+ * @version 3.2.0
  */
 import { FluxDispatcher } from "@vendetta/metro/common";
 import { findByProps, findByStoreName } from "@vendetta/metro";
@@ -84,6 +84,167 @@ function validateUserId(userId: string): boolean {
     return /^\d+$/.test(userId.trim());
 }
 
+// Parse color from various formats
+function parseColor(colorInput: any): number | undefined {
+    if (typeof colorInput === 'number') {
+        return colorInput;
+    }
+    
+    if (typeof colorInput === 'string') {
+        const colorStr = colorInput.trim();
+        if (colorStr.startsWith('#')) {
+            const parsed = parseInt(colorStr.substring(1), 16);
+            return isNaN(parsed) ? undefined : parsed;
+        } else if (colorStr.startsWith('0x')) {
+            const parsed = parseInt(colorStr, 16);
+            return isNaN(parsed) ? undefined : parsed;
+        } else if (!isNaN(Number(colorStr))) {
+            return Number(colorStr);
+        }
+    }
+    
+    return undefined;
+}
+
+// Fetch and parse OpenGraph metadata from URL
+async function fetchOpenGraphData(url: string): Promise<any> {
+    try {
+        log(`Fetching OpenGraph data from: ${url}`);
+        
+        // Fetch the HTML content
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const html = await response.text();
+        
+        // Parse meta tags
+        const ogData: any = {};
+        const twitterData: any = {};
+        
+        // Extract OpenGraph tags
+        const ogRegex = /<meta\s+property=["']og:([^"']+)["']\s+content=["']([^"']+)["']/gi;
+        let match;
+        while ((match = ogRegex.exec(html)) !== null) {
+            ogData[match[1]] = match[2];
+        }
+        
+        // Extract Twitter Card tags
+        const twitterRegex = /<meta\s+(?:name|property)=["']twitter:([^"']+)["']\s+content=["']([^"']+)["']/gi;
+        while ((match = twitterRegex.exec(html)) !== null) {
+            twitterData[match[1]] = match[2];
+        }
+        
+        // Also try alternate format
+        const ogRegex2 = /<meta\s+content=["']([^"']+)["']\s+property=["']og:([^"']+)["']/gi;
+        while ((match = ogRegex2.exec(html)) !== null) {
+            ogData[match[2]] = match[1];
+        }
+        
+        const twitterRegex2 = /<meta\s+content=["']([^"']+)["']\s+(?:name|property)=["']twitter:([^"']+)["']/gi;
+        while ((match = twitterRegex2.exec(html)) !== null) {
+            twitterData[match[2]] = match[1];
+        }
+        
+        // Extract theme-color for Discord's embed color
+        const themeColorRegex = /<meta\s+name=["']theme-color["']\s+content=["']([^"']+)["']/i;
+        const themeMatch = html.match(themeColorRegex);
+        const themeColor = themeMatch ? themeMatch[1] : null;
+        
+        log('Parsed OpenGraph data:', ogData);
+        log('Parsed Twitter data:', twitterData);
+        
+        // Build embed object from parsed data
+        const embed: any = {
+            type: ogData.type || 'rich'
+        };
+        
+        // Title (prefer OG, fall back to Twitter)
+        if (ogData.title || twitterData.title) {
+            embed.title = ogData.title || twitterData.title;
+        }
+        
+        // Description
+        if (ogData.description || twitterData.description) {
+            embed.description = ogData.description || twitterData.description;
+        }
+        
+        // URL
+        if (ogData.url || url) {
+            embed.url = ogData.url || url;
+        }
+        
+        // Color (from theme-color or og:color if present)
+        if (themeColor) {
+            const color = parseColor(themeColor);
+            if (color !== undefined) {
+                embed.color = color;
+            }
+        }
+        
+        // Image (prefer OG, fall back to Twitter)
+        const imageUrl = ogData.image || twitterData.image || twitterData['image:src'];
+        if (imageUrl) {
+            embed.image = { url: imageUrl };
+            
+            // Image dimensions if available
+            if (ogData['image:width'] && ogData['image:height']) {
+                embed.image.width = parseInt(ogData['image:width']);
+                embed.image.height = parseInt(ogData['image:height']);
+            }
+        }
+        
+        // Site name as author
+        if (ogData.site_name) {
+            embed.author = {
+                name: ogData.site_name
+            };
+            
+            // Add site icon if available
+            const iconRegex = /<link\s+rel=["'](?:icon|shortcut icon)["']\s+(?:type=["'][^"']+["']\s+)?href=["']([^"']+)["']/i;
+            const iconMatch = html.match(iconRegex);
+            if (iconMatch) {
+                let iconUrl = iconMatch[1];
+                // Make relative URLs absolute
+                if (iconUrl.startsWith('/')) {
+                    const urlObj = new URL(url);
+                    iconUrl = `${urlObj.protocol}//${urlObj.host}${iconUrl}`;
+                }
+                embed.author.icon_url = iconUrl;
+            }
+        }
+        
+        // Add provider info
+        if (embed.url) {
+            try {
+                const urlObj = new URL(embed.url);
+                embed.provider = {
+                    name: urlObj.hostname,
+                    url: `${urlObj.protocol}//${urlObj.host}`
+                };
+            } catch (e) { }
+        }
+        
+        // Only return embed if it has meaningful content
+        if (embed.title || embed.description || embed.image) {
+            log('Successfully created embed from URL:', embed);
+            return embed;
+        }
+        
+        log('No meaningful OpenGraph data found');
+        return null;
+    } catch (e) {
+        logError('Failed to fetch OpenGraph data', e);
+        return null;
+    }
+}
+
 // Validate embed
 function validateEmbed(embed: any): any | undefined {
     if (!embed) return undefined;
@@ -132,6 +293,8 @@ function validateEmbed(embed: any): any | undefined {
         // Image
         if (embed.image?.url && typeof embed.image.url === 'string') {
             validEmbed.image = { url: embed.image.url };
+            if (typeof embed.image.width === 'number') validEmbed.image.width = embed.image.width;
+            if (typeof embed.image.height === 'number') validEmbed.image.height = embed.image.height;
         }
         
         // Thumbnail
@@ -150,6 +313,17 @@ function validateEmbed(embed: any): any | undefined {
             }
             if (embed.author.icon_url && typeof embed.author.icon_url === 'string') {
                 validEmbed.author.icon_url = embed.author.icon_url;
+            }
+        }
+        
+        // Provider (Discord-specific)
+        if (embed.provider && typeof embed.provider === 'object') {
+            validEmbed.provider = {};
+            if (embed.provider.name && typeof embed.provider.name === 'string') {
+                validEmbed.provider.name = embed.provider.name;
+            }
+            if (embed.provider.url && typeof embed.provider.url === 'string') {
+                validEmbed.provider.url = embed.provider.url;
             }
         }
         
@@ -615,6 +789,7 @@ export async function fakeMessage(options: {
     username?: string;
     avatar?: string;
     embed?: any;
+    embedUrl?: string; // NEW: Auto-generate embed from URL
     timestamp?: string;
     persistent?: boolean;
 }): Promise<boolean> {
@@ -643,13 +818,26 @@ export async function fakeMessage(options: {
             return false;
         }
 
+        // NEW: Auto-fetch embed from URL if embedUrl is provided
+        let finalEmbed = options.embed;
+        if (options.embedUrl && !finalEmbed) {
+            if (showToast) showToast('🔍 Fetching embed data...', 'Small');
+            const fetchedEmbed = await fetchOpenGraphData(options.embedUrl);
+            if (fetchedEmbed) {
+                finalEmbed = fetchedEmbed;
+                if (showToast) showToast('✅ Embed data fetched!', 'Check');
+            } else {
+                if (showToast) showToast('⚠️ Could not fetch embed data', 'Small');
+            }
+        }
+
         const message = await createMessageObject({
             channelId,
             userId: options.fromUserId,
             content: options.content,
             username: options.username,
             avatar: options.avatar,
-            embed: options.embed,
+            embed: finalEmbed,
             timestamp: options.timestamp
         });
 
@@ -658,7 +846,6 @@ export async function fakeMessage(options: {
                 storage.persistentMessages[channelId] = [];
             }
             
-            // ONLY ADD THIS CHECK - rest stays the same:
             const existingIds = new Set(storage.persistentMessages[channelId].map((m: any) => m.id));
             if (!existingIds.has(message.id)) {
                 storage.persistentMessages[channelId].push(message);
@@ -958,7 +1145,7 @@ function recoverStorage() {
 export default {
     onLoad: async () => {
         try {
-            logger.log('[MessageInjector] Loading v3.1.0 (Enhanced Edition)...');
+            logger.log('[MessageInjector] Loading v3.2.0 (Auto-Embed Edition)...');
 
             recoverStorage();
 
@@ -996,6 +1183,7 @@ export default {
             // Expose API to window for console access
             (window as any).__MESSAGE_FAKER__ = {
                 fakeMessage,
+                fetchOpenGraphData, // NEW: Expose for testing
                 clearAllMessages,
                 clearChannelMessages,
                 getAllMessages,
@@ -1019,8 +1207,8 @@ export default {
                 }
             };
 
-            logger.log('[MessageInjector] ✅ Loaded successfully v3.1.0');
-            logger.log('[MessageInjector] New: Timestamp control & comprehensive embed fields');
+            logger.log('[MessageInjector] ✅ Loaded successfully v3.2.0');
+            logger.log('[MessageInjector] New: Auto-embed generation from URLs!');
 
         } catch (e) {
             logError('Fatal error during load', e);
