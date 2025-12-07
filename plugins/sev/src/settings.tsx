@@ -25,6 +25,9 @@ const styles = StyleSheet.create({
     warningButton: {
         backgroundColor: "#FAA61A",
     },
+    infoButton: {
+        backgroundColor: "#4F545C",
+    },
     buttonText: {
         color: "white",
         fontWeight: "bold" as const,
@@ -38,6 +41,12 @@ const styles = StyleSheet.create({
     },
     warningText: {
         color: "#FAA61A",
+        fontSize: 13,
+        marginHorizontal: 16,
+        marginVertical: 4,
+    },
+    successText: {
+        color: "#3BA55D",
         fontSize: 13,
         marginHorizontal: 16,
         marginVertical: 4,
@@ -65,9 +74,13 @@ export default () => {
     const [fromUserId, setFromUserId] = React.useState("");
     const [messageContent, setMessageContent] = React.useState("");
     const [messageTimestamp, setMessageTimestamp] = React.useState("");
+    
+    // NEW: URL auto-embed
+    const [embedUrl, setEmbedUrl] = React.useState("");
+    
+    // Manual embed fields (optional)
     const [embedTitle, setEmbedTitle] = React.useState("");
     const [embedDescription, setEmbedDescription] = React.useState("");
-    const [embedUrl, setEmbedUrl] = React.useState("");
     const [embedColor, setEmbedColor] = React.useState("");
     const [embedImage, setEmbedImage] = React.useState("");
     const [embedThumbnail, setEmbedThumbnail] = React.useState("");
@@ -96,22 +109,21 @@ export default () => {
             return;
         }
 
-        if (!messageContent.trim() && !embedTitle.trim()) {
-            showToast("❌ Enter message content or embed", "Small");
+        if (!messageContent.trim() && !embedTitle.trim() && !embedUrl.trim()) {
+            showToast("❌ Enter message content, embed URL, or manual embed", "Small");
             return;
         }
 
-        // Build embed object with all fields
+        // Build manual embed object with all fields (if provided)
         let embed = undefined;
         if (embedTitle || embedDescription || embedImage || embedThumbnail || 
-            embedAuthorName || embedFooterText || embedUrl || embedColor || 
+            embedAuthorName || embedFooterText || embedColor || 
             embedTimestamp || embedFields) {
             
             embed = {};
             
             if (embedTitle) embed.title = embedTitle;
             if (embedDescription) embed.description = embedDescription;
-            if (embedUrl) embed.url = embedUrl;
             
             // Parse color (hex or decimal)
             if (embedColor) {
@@ -160,6 +172,7 @@ export default () => {
                 fromUserId: fromUserId.trim(),
                 content: messageContent.trim(),
                 embed: embed,
+                embedUrl: embedUrl.trim() || undefined, // NEW: Pass URL for auto-embed
                 timestamp: messageTimestamp.trim() || undefined,
                 persistent: true
             });
@@ -169,6 +182,40 @@ export default () => {
             }
         } catch (e) {
             showToast("❌ Failed to send message", "Small");
+        }
+    };
+
+    const handleTestUrlEmbed = async () => {
+        const api = getAPI();
+        if (!api) {
+            showToast("❌ Plugin not ready", "Small");
+            return;
+        }
+
+        if (!embedUrl.trim()) {
+            showToast("❌ Enter a URL first", "Small");
+            return;
+        }
+
+        try {
+            showToast("🔍 Fetching embed data...", "Small");
+            const embedData = await api.fetchOpenGraphData(embedUrl.trim());
+            
+            if (embedData) {
+                // Auto-fill the manual embed fields with fetched data
+                if (embedData.title) setEmbedTitle(embedData.title);
+                if (embedData.description) setEmbedDescription(embedData.description);
+                if (embedData.color) setEmbedColor(embedData.color.toString());
+                if (embedData.image?.url) setEmbedImage(embedData.image.url);
+                if (embedData.author?.name) setEmbedAuthorName(embedData.author.name);
+                if (embedData.author?.icon_url) setEmbedAuthorIcon(embedData.author.icon_url);
+                
+                showToast("✅ Embed data loaded! Review and edit below", "Check");
+            } else {
+                showToast("❌ Could not fetch embed data from URL", "Small");
+            }
+        } catch (e) {
+            showToast("❌ Failed to fetch embed data", "Small");
         }
     };
 
@@ -215,6 +262,20 @@ export default () => {
         }
     };
 
+    const pasteUrl = async () => {
+        try {
+            const text = await clipboard.getString();
+            if (text && (text.startsWith('http://') || text.startsWith('https://'))) {
+                setEmbedUrl(text.trim());
+                showToast("📋 Pasted URL", "clipboard");
+            } else {
+                showToast("❌ Clipboard doesn't contain a valid URL", "Small");
+            }
+        } catch (e) {
+            showToast("Failed to paste", "Small");
+        }
+    };
+
     const setCurrentTime = () => {
         setMessageTimestamp(new Date().toISOString());
         showToast("⏰ Set to current time", "Check");
@@ -236,9 +297,12 @@ export default () => {
 
     return (
         <ScrollView>
-            <FormSection title="MESSAGE FAKER v3.1.0">
+            <FormSection title="MESSAGE FAKER v3.2.0">
                 <FormText style={styles.infoText}>
-                    💬 Inject fake messages into DMs with timestamp control & full embed support
+                    💬 Inject fake messages into DMs with auto-embed from URLs!
+                </FormText>
+                <FormText style={styles.successText}>
+                    ✨ NEW: Paste any URL and get Discord embeds automatically!
                 </FormText>
                 <FormSwitch
                     label="Enable Plugin"
@@ -309,9 +373,11 @@ export default () => {
 
                 <FormInput
                     title="MESSAGE CONTENT"
-                    placeholder="The message text"
+                    placeholder="The message text (supports multiple lines)"
                     value={messageContent}
                     onChange={setMessageContent}
+                    multiline={true}
+                    numberOfLines={4}
                 />
 
                 <FormInput
@@ -332,9 +398,43 @@ export default () => {
 
             <FormDivider />
 
-            <FormSection title="EMBED (Optional)">
+            <FormSection title="✨ AUTO-EMBED FROM URL (NEW!)">
+                <FormText style={styles.successText}>
+                    🔗 Paste any URL and Discord will auto-generate an embed just like when you send a link!
+                </FormText>
+                
                 <FormText style={styles.infoText}>
-                    📎 Add a rich embed to your message
+                    Works with: YouTube, Twitter, GitHub, news sites, and most websites with OpenGraph metadata.
+                </FormText>
+
+                <FormInput
+                    title="EMBED URL"
+                    placeholder="https://github.com/username/repo"
+                    value={embedUrl}
+                    onChange={setEmbedUrl}
+                />
+
+                <TouchableOpacity style={styles.button} onPress={pasteUrl}>
+                    <Text style={styles.buttonText}>📋 Paste URL from Clipboard</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity 
+                    style={[styles.button, styles.infoButton]} 
+                    onPress={handleTestUrlEmbed}
+                >
+                    <Text style={styles.buttonText}>🔍 Preview & Load Embed Data</Text>
+                </TouchableOpacity>
+
+                <FormText style={styles.warningText}>
+                    💡 The embed will be fetched automatically when you send the message, OR you can preview it first to edit manually below
+                </FormText>
+            </FormSection>
+
+            <FormDivider />
+
+            <FormSection title="MANUAL EMBED (Optional)">
+                <FormText style={styles.infoText}>
+                    📎 Manually customize your embed (or edit auto-fetched data)
                 </FormText>
 
                 <FormInput
@@ -349,13 +449,8 @@ export default () => {
                     placeholder="Description (max 4096 characters)"
                     value={embedDescription}
                     onChange={setEmbedDescription}
-                />
-
-                <FormInput
-                    title="EMBED URL"
-                    placeholder="URL when title is clicked"
-                    value={embedUrl}
-                    onChange={setEmbedUrl}
+                    multiline={true}
+                    numberOfLines={4}
                 />
 
                 <FormInput
@@ -447,7 +542,11 @@ export default () => {
                 <FormText style={styles.warningText}>
                     💡 Max 25 fields. Field name: max 256 chars, value: max 1024 chars
                 </FormText>
+            </FormSection>
 
+            <FormDivider />
+
+            <FormSection title="SEND MESSAGE">
                 <TouchableOpacity
                     style={[styles.button, styles.successButton]}
                     onPress={handleSendFakeMessage}
@@ -470,19 +569,30 @@ export default () => {
                     🔧 Advanced usage via console:
                 </FormText>
 
+                <FormText style={styles.successText}>
+                    ✨ NEW: Auto-embed from URL
+                </FormText>
+
                 <Text style={styles.codeText}>
-                    {`// Basic message with timestamp
+                    {`// Auto-generate embed from URL
 __MESSAGE_FAKER__.fakeMessage({
   targetUserId: "USER_ID",
   fromUserId: "USER_ID",
-  content: "Hello!",
-  timestamp: "2024-01-15T12:30:00Z",
+  content: "Check this out!",
+  embedUrl: "https://github.com/user/repo",
   persistent: true
 });`}
                 </Text>
 
                 <Text style={styles.codeText}>
-                    {`// Full embed example
+                    {`// Test URL embed fetching
+const embed = await __MESSAGE_FAKER__
+  .fetchOpenGraphData("https://example.com");
+console.log(embed);`}
+                </Text>
+
+                <Text style={styles.codeText}>
+                    {`// Full manual embed example
 __MESSAGE_FAKER__.fakeMessage({
   targetUserId: "USER_ID",
   fromUserId: "USER_ID",
@@ -498,29 +608,18 @@ __MESSAGE_FAKER__.fakeMessage({
       url: "https://example.com",
       icon_url: "https://i.imgur.com/..."
     },
-    thumbnail: {
-      url: "https://i.imgur.com/..."
-    },
     image: {
       url: "https://i.imgur.com/..."
-    },
-    footer: {
-      text: "Footer Text",
-      icon_url: "https://i.imgur.com/..."
     },
     fields: [
       {
         name: "Field 1",
         value: "Value 1",
         inline: true
-      },
-      {
-        name: "Field 2",
-        value: "Value 2",
-        inline: true
       }
     ]
-  }
+  },
+  persistent: true
 });`}
                 </Text>
 
@@ -568,9 +667,9 @@ Black: #000000 (0)`}
                         setFromUserId("");
                         setMessageContent("");
                         setMessageTimestamp("");
+                        setEmbedUrl("");
                         setEmbedTitle("");
                         setEmbedDescription("");
-                        setEmbedUrl("");
                         setEmbedColor("");
                         setEmbedImage("");
                         setEmbedThumbnail("");
@@ -592,8 +691,8 @@ Black: #000000 (0)`}
             </FormSection>
 
             <FormText style={[styles.infoText, { marginTop: 16, marginBottom: 32, textAlign: "center" as const }]}>
-                MessageFaker v3.1.0 - Enhanced Edition
-                {'\n'}Timestamp Control • Full Embed Support
+                MessageFaker v3.2.0 - Auto-Embed Edition
+                {'\n'}✨ Auto-Embed from URLs • Timestamp Control • Full Embed Support
             </FormText>
         </ScrollView>
     );
